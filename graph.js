@@ -25,7 +25,19 @@ const msalInstance = new msal.PublicClientApplication({
   cache: { cacheLocation: "sessionStorage" }
 });
 
-const GRAPH_SCOPES = ["Sites.ReadWrite.All", "User.Read"]; // or Sites.Selected, see Step 2
+const GRAPH_SCOPES = ["Sites.ReadWrite.All", "User.Read", "User.Read.All", "GroupMember.Read.All"]; // or Sites.Selected, see Step 2
+// User.Read.All and GroupMember.Read.All let the signed-in user's token read
+// OTHER users' directory profiles and group memberships. A tenant admin must
+// grant consent for both once, from this app's "API permissions" page in the
+// Azure Portal — a regular user can't self-consent to them the way they can
+// for Sites.ReadWrite.All/User.Read.
+
+// Entra ID security groups used as role rosters for this app. Add one entry
+// per role group (e.g. compliance committee, EXCO) as they're created —
+// find each group's Object Id on its "Overview" page in the Azure Portal.
+const GRAPH_GROUPS = {
+  FCPA_DH: "0f4b2a0c-b245-4b04-82b6-b3d16bbb29c6" // "FCPA DH" — Department Head roster
+};
 
 async function signIn() {
   const result = await msalInstance.loginPopup({ scopes: GRAPH_SCOPES });
@@ -96,4 +108,56 @@ async function graphUpdateItem(listName, itemId, fields) {
 async function graphDeleteItem(listName, itemId) {
   const siteId = await getSiteId();
   await graphFetch(`/sites/${siteId}/lists/${listName}/items/${itemId}`, { method: "DELETE" });
+}
+
+/* -------------------------------------------------------------------------
+   Corporate directory (Entra ID / Microsoft Graph)
+   Maps a Graph user record into the shape EMPLOYEES/CURRENT_USER already use
+   in data.js. Graph has no concept of this app's approval-routing fields
+   (team, higherManagement, department-head assignment) — those still need
+   to come from your own source (e.g. an ABC_EmployeeRouting SharePoint
+   list keyed by employeeId), merged in after this mapping.
+   ------------------------------------------------------------------------- */
+const GRAPH_USER_SELECT = "id,displayName,mail,userPrincipalName,jobTitle,department,employeeId";
+
+function mapGraphUser(u) {
+  return {
+    employeeNo: u.employeeId || u.id,     // falls back to the Graph object id if employeeId isn't synced from HR
+    name: u.displayName,
+    department: u.department || "",
+    position: u.jobTitle || "",
+    email: (u.mail || u.userPrincipalName || "").toLowerCase(),
+    team: null,            // fill in from your routing source
+    higherManagement: false // fill in from your routing source
+  };
+}
+
+async function graphGetMe() {
+  const me = await graphFetch(`/me?$select=${GRAPH_USER_SELECT}`);
+  return mapGraphUser(me);
+}
+
+async function graphListUsers() {
+  const users = [];
+  let path = `/users?$select=${GRAPH_USER_SELECT}&$top=999`;
+  while (path) {
+    const page = await graphFetch(path);
+    users.push(...page.value.map(mapGraphUser));
+    path = page["@odata.nextLink"] ? page["@odata.nextLink"].replace("https://graph.microsoft.com/v1.0", "") : null;
+  }
+  return users;
+}
+
+// Members of an Entra ID security group (e.g. GRAPH_GROUPS.FCPA_DH), mapped
+// the same way as graphListUsers. Non-user members (e.g. nested groups) are
+// skipped since they don't have the selected user fields.
+async function graphGetGroupMembers(groupId) {
+  const members = [];
+  let path = `/groups/${groupId}/members?$select=${GRAPH_USER_SELECT}&$top=999`;
+  while (path) {
+    const page = await graphFetch(path);
+    members.push(...page.value.filter(m => m["@odata.type"] === "#microsoft.graph.user" || m.userPrincipalName).map(mapGraphUser));
+    path = page["@odata.nextLink"] ? page["@odata.nextLink"].replace("https://graph.microsoft.com/v1.0", "") : null;
+  }
+  return members;
 }
