@@ -36,7 +36,8 @@ const GRAPH_SCOPES = ["Sites.ReadWrite.All", "User.Read", "User.Read.All", "Grou
 // per role group (e.g. compliance committee, EXCO) as they're created —
 // find each group's Object Id on its "Overview" page in the Azure Portal.
 const GRAPH_GROUPS = {
-  FCPA_DH: "0f4b2a0c-b245-4b04-82b6-b3d16bbb29c6" // "FCPA DH" — Department Head roster
+  FCPA_DH: "0f4b2a0c-b245-4b04-82b6-b3d16bbb29c6",         // "FCPA DH" — Department Head roster
+  HIGHER_MANAGEMENT: "a125a4bc-7645-4ef7-910c-2fbbb9261642" // "FCPA Higher Management" — skips DH, straight to CFO
 };
 
 async function signIn() {
@@ -122,14 +123,24 @@ const GRAPH_USER_SELECT = "id,displayName,mail,userPrincipalName,jobTitle,depart
 
 function mapGraphUser(u) {
   return {
+    graphId: u.id,                        // Entra object id — use this (not employeeNo) for group-membership checks
     employeeNo: u.employeeId || u.id,     // falls back to the Graph object id if employeeId isn't synced from HR
     name: u.displayName,
     department: u.department || "",
     position: u.jobTitle || "",
     email: (u.mail || u.userPrincipalName || "").toLowerCase(),
     team: null,            // fill in from your routing source
-    higherManagement: false // fill in from your routing source
+    higherManagement: false // set via applyHigherManagementFlag() below
   };
+}
+
+// Marks `user` as Higher Management if they belong to GRAPH_GROUPS.HIGHER_MANAGEMENT
+// (mirrors the isChuahFamily check in the existing Power Apps build, but reads
+// live group membership instead of a hardcoded email list).
+async function applyHigherManagementFlag(user) {
+  const hmMembers = await graphGetGroupMembers(GRAPH_GROUPS.HIGHER_MANAGEMENT);
+  user.higherManagement = hmMembers.some(m => m.graphId === user.graphId);
+  return user;
 }
 
 async function graphGetMe() {
