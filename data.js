@@ -186,6 +186,58 @@ function claimChainDef(higherMgmt) {
   ];
 }
 
+/* --------------------------------------------------------------------------
+   Amount-tiered authority matrix ("FCPA Expenses", policy item 14.4) —
+   NOT YET WIRED into the live submit flow (preApprovalChainDef/claimChainDef
+   above are still what createPreApproval/submitClaim actually use). Kept as
+   a separate, self-contained set of functions until it's confirmed whether
+   this REPLACES the HOD/SHOD/DH/CFO/GCOO/Compliance chain above entirely,
+   or only applies alongside/above it.
+
+     <= $7,500     -> COO only
+     <= $25,000    -> MD only
+     <= $125,000   -> EXCO Members (every ABC Authority roster member,
+                      sequential, one at a time)
+     > $125,000    -> BOD required per policy, not built yet — falls back
+                      to the EXCO tier above and is flagged in the UI.
+
+   fixedName values below are the fallback used when no live ABC Authority
+   data is available (Approver-preview / demo mode); a real sign-in passes
+   authorityList and these are looked up live instead — see authorityName().
+   -------------------------------------------------------------------------- */
+const TIER_COO_MAX_USD = 7500;
+const TIER_MD_MAX_USD = 25000;
+const TIER_EXCO_MAX_USD = 125000;
+
+const STAGE_COO_SHORT = { title: "COO", role: "Chief Operating Officer", tag: "COO", fixedName: "Chuah Eng Meng" };
+const STAGE_MD_SHORT = { title: "MD", role: "Managing Director", tag: "MD", fixedName: "Dato' Seri Chuah Kim Seah" };
+
+function authorityName(authorityList, tag, fallbackName) {
+  const match = (authorityList || []).find(a => a.tag === tag);
+  return (match && match.name) || fallbackName;
+}
+
+/* Sequential EXCO sign-off roster: every row in the live ABC Authority list
+   (order as returned) once signed in for real; falls back to the static
+   EXCO_ROSTER for the demo/Approver-preview flow. */
+function excoStageDefs(authorityList) {
+  const roster = (authorityList && authorityList.length)
+    ? authorityList.map(a => ({ name: a.name, title: a.tag || a.position || "EXCO" }))
+    : EXCO_ROSTER.map(e => ({ name: e.name, title: e.title }));
+  return roster.map(m => ({ title: "EXCO - " + m.title, role: "EXCO Members", fixedName: m.name }));
+}
+
+function tieredChainDef(totalUSD, authorityList) {
+  if (totalUSD <= TIER_COO_MAX_USD) {
+    return [{ ...STAGE_COO_SHORT, fixedName: authorityName(authorityList, "COO", STAGE_COO_SHORT.fixedName) }];
+  }
+  if (totalUSD <= TIER_MD_MAX_USD) {
+    return [{ ...STAGE_MD_SHORT, fixedName: authorityName(authorityList, "MD", STAGE_MD_SHORT.fixedName) }];
+  }
+  // $125,000 tier, and >$125,000 falling back here until BOD is built.
+  return excoStageDefs(authorityList);
+}
+
 /* All possible approver identities an "Approver" can sign in as: every DH,
    every HOD/SHOD across the org lines, plus every fixed-name role. */
 function allApproverIdentities() {

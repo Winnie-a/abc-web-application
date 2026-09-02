@@ -172,3 +172,26 @@ async function graphGetGroupMembers(groupId) {
   }
   return members;
 }
+
+/* -------------------------------------------------------------------------
+   ABC Authority (SharePoint list) — the live role -> person roster (CFO,
+   COO, GCOO, MD, Compliance Committee, ...), replacing hardcoded fixedName
+   values in data.js. The exact internal SharePoint field name for the
+   "Title Authority" column wasn't confirmed, so this tries a few plausible
+   variants defensively — if none match, fix the fallback chain below to
+   whatever the real internal name turns out to be (visible in a raw
+   graphListItems("ABC Authority") result).
+   ------------------------------------------------------------------------- */
+function mapAuthorityRow(item) {
+  return {
+    name: item.Title,
+    email: item.Email,
+    position: item.Position,
+    tag: item.TitleAuthority || item.Title_x0020_Authority || item.Title1 || ""
+  };
+}
+
+async function graphGetAuthorityList() {
+  const rows = await graphListItems("ABC Authority");
+  return rows.map(mapAuthorityRow);
+}

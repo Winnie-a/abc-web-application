@@ -37,7 +37,8 @@ const App = {
     modal: null,
     authBusy: false,
     dhOptions: [], // live FCPA DH group members, populated on real sign-in — see signInWithMicrosoft()
-    directory: []  // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
+    directory: [], // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
+    authority: []  // live ABC Authority roster (CFO/COO/GCOO/MD/Compliance), populated on real sign-in
   },
 
   init() {
@@ -85,17 +86,19 @@ const App = {
     this.render();
     try {
       await signIn();
-      const [me, directory, dhOptions, hmMembers] = await Promise.all([
+      const [me, directory, dhOptions, hmMembers, authority] = await Promise.all([
         graphGetMe(),
         graphListUsers(),
         graphGetGroupMembers(GRAPH_GROUPS.FCPA_DH),
-        graphGetGroupMembers(GRAPH_GROUPS.HIGHER_MANAGEMENT)
+        graphGetGroupMembers(GRAPH_GROUPS.HIGHER_MANAGEMENT),
+        graphGetAuthorityList()
       ]);
       const hmIds = new Set(hmMembers.map(u => u.graphId));
       directory.forEach(u => { u.higherManagement = hmIds.has(u.graphId); });
       me.higherManagement = hmIds.has(me.graphId);
       this.state.directory = directory;
       this.state.dhOptions = dhOptions;
+      this.state.authority = authority;
       this.state.session = { mode: "staff", employee: me };
       this.state.view = "home";
     } catch (e) {
