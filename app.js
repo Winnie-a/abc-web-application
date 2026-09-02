@@ -634,7 +634,7 @@ const App = {
     if (!val) { this.toast("Please select your department head."); return; }
     this.finalizePreApproval(val);
   },
-  finalizePreApproval(dh) {
+  async finalizePreApproval(dh) {
     const w = this.state.wizard;
     w.departmentHead = dh;
     const payload = {
@@ -643,11 +643,12 @@ const App = {
       description: w.description, currency: w.currency, amounts: w.amounts,
       paymentTo: w.paymentTo, remarks: w.remarks, departmentHead: w.departmentHead
     };
-    const rec = Store.createPreApproval(payload);
+    const rec = await Store.createPreApproval(payload);
     this.state.modal = null;
     this.state.wizard = null;
+    const syncMsg = rec.syncError ? " (saved locally — SharePoint sync failed, see console)" : "";
     const notifyMsg = rec.notify ? ` Notifying ${rec.notify.name} (${rec.notify.title}) → ${rec.notify.email}` : "";
-    this.toast("Submitted for approval — " + rec.refNo + "." + notifyMsg);
+    this.toast("Submitted for approval — " + rec.refNo + "." + notifyMsg + syncMsg);
     this.openSubmission("preapproval");
   },
 

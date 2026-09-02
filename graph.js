@@ -40,6 +40,10 @@ const GRAPH_GROUPS = {
   HIGHER_MANAGEMENT: "a125a4bc-7645-4ef7-910c-2fbbb9261642" // "FCPA Higher Management" — skips DH, straight to CFO
 };
 
+function isGraphConnected() {
+  return !!msalInstance.getActiveAccount();
+}
+
 async function signIn() {
   const result = await msalInstance.loginPopup({ scopes: GRAPH_SCOPES });
   msalInstance.setActiveAccount(result.account);

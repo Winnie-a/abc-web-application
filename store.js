@@ -278,6 +278,73 @@ function pendingNotifyTarget(stages) {
   return { name: s.name, title: s.title, email: Store.getApproverEmail(s.name) };
 }
 
+/* --------------------------------------------------------------------------
+   SharePoint push — ABC Pre-Approval + ABC Recipient Final Expenses
+   Internal SharePoint column names below are a BEST GUESS (display name
+   with spaces stripped, e.g. "Others Type" -> "OthersType"), except
+   FCPA No -> Title, which is SharePoint's mandatory default column,
+   renamed. None of this has been verified against the real list yet —
+   verify once a real sign-in can actually reach it, and fix any names
+   Graph rejects (the error will name the offending field).
+   -------------------------------------------------------------------------- */
+
+// Approval stage title -> the "Gate 0"/"Gate 1" column-name suffix used in
+// SharePoint (Compliance Committee 1/2 shorten to Comp/Comp2; everything
+// else matches the stage title as-is).
+function gateColumnKey(stageTitle) {
+  const map = { "Compliance Committee 1": "Comp", "Compliance Committee 2": "Comp2" };
+  return map[stageTitle] || stageTitle.replace(/\s+/g, "");
+}
+
+function gateFields(gatePrefix, stage) {
+  const key = gatePrefix + gateColumnKey(stage.title);
+  return {
+    [key]: stage.name || "",
+    [key + "Email"]: stage.email || "",
+    [key + "Position"]: stage.position || "",
+    [key + "ApprovalStatus"]: stage.status,
+    [key + "ApprovalDate"]: stage.date,
+    [key + "Comments"]: stage.comments || "",
+    [key + "RejectReason"]: stage.rejectReason || ""
+  };
+}
+
+async function pushPreApprovalToSharePoint(rec) {
+  const a = rec.amounts;
+  const fields = {
+    Title: rec.refNo,
+    NameofRequestor: rec.requestor.name,
+    EmployeeNo: rec.requestor.employeeNo,
+    Department: rec.requestor.department,
+    Position: rec.requestor.position,
+    Email: rec.requestor.email || "",
+    ProposedTransaction: (rec.transactionTypes || []).join("; "),
+    ProposedTransactionDescription: rec.description || "",
+    Currency: rec.currency,
+    Gifts: a.gifts, Meals: a.meals, Entertainment: a.entertainment, Airfare: a.airfare,
+    Transportation: a.transportation, Hotel: a.hotel,
+    OthersType: a.othersLabel, OthersAmount: a.othersAmount,
+    PaymentInfo: rec.paymentTo, Remarks: rec.remarks,
+    Gate0: rec.status,
+    IsCancelled: false
+  };
+  rec.approvals.forEach(stage => Object.assign(fields, gateFields("Gate0", stage)));
+
+  const item = await graphCreateItem("ABC Pre-Approval", fields);
+  rec.spId = item.id;
+
+  // Recipient rows: RecipientID should look up the matching ABC Customer
+  // item, but recipients are still picked from the local demo/RECIPIENTS
+  // list rather than live ABC Customer data, so there's no real Customer
+  // item id to link yet — written without RecipientID until that's wired.
+  for (const r of rec.recipients) {
+    await graphCreateItem("ABC Recipient Final Expenses", {
+      FCPANo: rec.refNo,
+      Gifts: 0, Meals: 0, Entertainment: 0, Travel: 0, Others: 0
+    });
+  }
+}
+
 const Store = {
   state: null,
 
@@ -319,12 +386,26 @@ const Store = {
     this.save();
   },
 
-  createPreApproval(draft) {
+  async createPreApproval(draft) {
     const rec = { ...draft, id: uid(), refNo: genRefNo(), dateSubmitted: todayISO(), status: "Pending", claim: null };
     rec.approvals = buildChain(preApprovalChainDef(isHigherManagement(rec.requestor)), chainResolveMap(rec.requestor, rec.departmentHead));
     this.state.preApprovals.unshift(rec);
     this.save();
     rec.notify = pendingNotifyTarget(rec.approvals);
+
+    if (typeof isGraphConnected === "function" && isGraphConnected()) {
+      try {
+        await pushPreApprovalToSharePoint(rec);
+      } catch (e) {
+        // Field-name mismatches are expected until the internal SharePoint
+        // column names are verified against this best-guess mapping — see
+        // pushPreApprovalToSharePoint. Keep the local submission working
+        // either way rather than blocking the user on a sync failure.
+        console.error("SharePoint push failed for", rec.refNo, e);
+        rec.syncError = (e && e.message) || String(e);
+        this.save();
+      }
+    }
     return rec;
   },
 
