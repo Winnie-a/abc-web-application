@@ -312,13 +312,13 @@ function gateFields(gatePrefix, stage) {
 async function pushPreApprovalToSharePoint(rec) {
   const a = rec.amounts;
   const fields = {
-    Title: rec.refNo,
+    FCPANo: rec.refNo,
     NameofRequestor: rec.requestor.name,
     EmployeeNo: rec.requestor.employeeNo,
     Department: rec.requestor.department,
     Position: rec.requestor.position,
     Email: rec.requestor.email || "",
-    ProposedTransaction: (rec.transactionTypes || []).join("; "),
+    ProposedTransaction: rec.transactionTypes || [], // MultiChoice field — array, not a joined string
     ProposedTransactionDescription: rec.description || "",
     Currency: rec.currency,
     Gifts: a.gifts, Meals: a.meals, Entertainment: a.entertainment, Airfare: a.airfare,
