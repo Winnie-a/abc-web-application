@@ -34,7 +34,10 @@ const App = {
     sub: null,
     detail: null,
     approver: null,
-    modal: null
+    modal: null,
+    authBusy: false,
+    dhOptions: [], // live FCPA DH group members, populated on real sign-in — see signInWithMicrosoft()
+    directory: []  // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
   },
 
   init() {
@@ -75,6 +78,32 @@ const App = {
     this.state.session = { mode: "staff", employee: CURRENT_USER };
     this.state.view = "home";
     this.render();
+  },
+  async signInWithMicrosoft() {
+    if (this.state.authBusy) return;
+    this.state.authBusy = true;
+    this.render();
+    try {
+      await signIn();
+      const [me, directory, dhOptions, hmMembers] = await Promise.all([
+        graphGetMe(),
+        graphListUsers(),
+        graphGetGroupMembers(GRAPH_GROUPS.FCPA_DH),
+        graphGetGroupMembers(GRAPH_GROUPS.HIGHER_MANAGEMENT)
+      ]);
+      const hmIds = new Set(hmMembers.map(u => u.graphId));
+      directory.forEach(u => { u.higherManagement = hmIds.has(u.graphId); });
+      me.higherManagement = hmIds.has(me.graphId);
+      this.state.directory = directory;
+      this.state.dhOptions = dhOptions;
+      this.state.session = { mode: "staff", employee: me };
+      this.state.view = "home";
+    } catch (e) {
+      this.toast("Sign-in failed: " + (e.message || e));
+    } finally {
+      this.state.authBusy = false;
+      this.render();
+    }
   },
   loginApprover() {
     const sel = document.getElementById("approverIdentitySelect");
@@ -188,16 +217,16 @@ const App = {
           <a class="tab ${mode === "approver" ? "active" : ""}" onclick="App.setLoginMode('approver')">Approver sign-in</a>
         </div>
         ${mode === "staff" ? `
-          <label>Corporate account</label>
-          <input type="text" value="${esc(CURRENT_USER.email)}" disabled>
-          <p class="small muted" style="text-align:left;margin:10px 0 0;">Signed in as <b>${esc(CURRENT_USER.name)}</b> &middot; ${esc(CURRENT_USER.employeeNo)} &middot; ${esc(CURRENT_USER.department)}</p>
-          <button class="btn btn-primary" style="width:100%;margin-top:24px;" onclick="App.loginStaff()">Continue to ABC Application</button>
+          <p class="small muted" style="text-align:left;margin:0 0 20px;">Sign in with your corporate Microsoft account to continue.</p>
+          <button class="btn btn-primary" style="width:100%;" onclick="App.signInWithMicrosoft()" ${this.state.authBusy ? "disabled" : ""}>${this.state.authBusy ? "Signing in&hellip;" : "Sign in with Microsoft"}</button>
         ` : `
           <label>Sign in as</label>
           <select id="approverIdentitySelect">${approverOptions}</select>
           <button class="btn btn-primary" style="width:100%;margin-top:24px;" onclick="App.loginApprover()">Continue to Approver Console</button>
         `}
-        <div class="hint">Demo build &mdash; corporate SSO is simulated. Use the tabs above to preview either the staff submission experience or the approver console.</div>
+        <div class="hint">${mode === "staff"
+          ? "Uses your real Microsoft 365 sign-in and directory profile."
+          : "Demo build &mdash; approver identity is still a manual picker, since only the Department Head roster is wired to a live Entra ID group so far."}</div>
       </div>
     </div>`;
   },
@@ -222,7 +251,7 @@ const App = {
     const emp = this.state.session.employee;
     this.state.wizard = {
       tab: "A",
-      requestor: { name: emp.name, employeeNo: emp.employeeNo, department: emp.department, position: emp.position },
+      requestor: { name: emp.name, employeeNo: emp.employeeNo, department: emp.department, position: emp.position, higherManagement: !!emp.higherManagement },
       recipients: [],
       transactionTypes: [],
       description: "",
@@ -330,20 +359,25 @@ const App = {
       </div>
     </div>`;
   },
+  requestorDirectory() {
+    // Live Entra ID directory once signed in via real MSAL; falls back to
+    // the static demo list for the Approver-preview flow.
+    return this.state.directory.length ? this.state.directory : EMPLOYEES;
+  },
   filterRequestor(q) {
     const list = document.getElementById("reqComboList");
     if (!list) return;
-    const items = EMPLOYEES.filter(e => e.name.toLowerCase().includes((q || "").toLowerCase()));
+    const items = this.requestorDirectory().filter(e => e.name.toLowerCase().includes((q || "").toLowerCase()));
     list.innerHTML = items.length
       ? items.map(e => `<div onmousedown="App.pickRequestor('${esc(e.employeeNo)}')">${esc(e.name)} <span class="muted small">&middot; ${esc(e.employeeNo)} &middot; ${esc(e.department)}</span></div>`).join("")
       : `<div class="none">No matching employee</div>`;
     list.style.display = "block";
   },
   pickRequestor(empNo) {
-    const emp = EMPLOYEES.find(e => e.employeeNo === empNo);
+    const emp = this.requestorDirectory().find(e => e.employeeNo === empNo);
     if (!emp) return;
     const w = this.state.wizard;
-    w.requestor = { name: emp.name, employeeNo: emp.employeeNo, department: emp.department, position: emp.position };
+    w.requestor = { name: emp.name, employeeNo: emp.employeeNo, department: emp.department, position: emp.position, higherManagement: !!emp.higherManagement };
     if (!w.departmentHead) w.departmentHead = defaultDHForEmployee(emp) || "";
     this.render();
   },
@@ -1237,13 +1271,17 @@ const App = {
   },
 
   modalSelectDH(m) {
+    /* Live Entra ID group members (FCPA DH) once signed in via real MSAL;
+       falls back to the static demo list for the Approver-preview flow,
+       which doesn't go through signInWithMicrosoft(). */
+    const dhList = this.state.dhOptions.length ? this.state.dhOptions : DEPARTMENT_HEADS;
     return `<div class="modal-overlay" onmousedown="if(event.target===this) App.closeModal()">
       <div class="modal">
         <h3>Please select your department head:</h3>
         <div class="field">
           <select id="dhSelect" onchange="App.state.modal.value=this.value">
             <option value="">Select DH</option>
-            ${DEPARTMENT_HEADS.map(dh => `<option value="${esc(dh.name)}" ${m.value === dh.name ? "selected" : ""}>${esc(dh.name)}${dh.team ? " (" + dh.team + ")" : ""}</option>`).join("")}
+            ${dhList.map(dh => `<option value="${esc(dh.name)}" ${m.value === dh.name ? "selected" : ""}>${esc(dh.name)}${dh.team ? " (" + dh.team + ")" : ""}</option>`).join("")}
           </select>
         </div>
         <div class="modal-actions">

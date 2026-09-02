@@ -35,7 +35,13 @@ function employeeByNo(employeeNo) {
   return EMPLOYEES.find(e => e.employeeNo === employeeNo) || null;
 }
 function isHigherManagement(requestor) {
-  const emp = requestor && employeeByNo(requestor.employeeNo);
+  if (!requestor) return false;
+  // A requestor built from a real Graph directory pick already carries its
+  // own higherManagement flag (from the FCPA Higher Management Entra ID
+  // group) — trust it. Only fall back to the static EMPLOYEES lookup for
+  // the demo/Approver-preview flow, which doesn't set that flag.
+  if (typeof requestor.higherManagement === "boolean") return requestor.higherManagement;
+  const emp = employeeByNo(requestor.employeeNo);
   return !!(emp && emp.higherManagement);
 }
 
