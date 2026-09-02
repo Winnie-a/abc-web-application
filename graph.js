@@ -6,8 +6,8 @@
    ========================================================================== */
 
 const GRAPH_CONFIG = {
-  clientId: "YOUR-AZURE-AD-APP-CLIENT-ID",
-  tenantId: "YOUR-AZURE-AD-TENANT-ID",
+  clientId: "af0925ee-e6d6-4477-88fe-926100eacf7f",
+  tenantId: "58000a83-938f-4833-b798-e6b43eab9bb6",
   siteHostname: "yourtenant.sharepoint.com",   // no https://
   sitePath: "/sites/ABCApplication",           // your site's server-relative path
   redirectUri: window.location.origin + window.location.pathname

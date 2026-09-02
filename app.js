@@ -375,28 +375,23 @@ const App = {
         Recipient(s) Info
         <a onclick="App.openAddRecipientModal()">Can't find the recipient? Click here</a>
       </div>
+      <div class="banner warn" style="margin-bottom:16px;">
+        <span>&#9888;</span>
+        <div><b>Important</b>Select the recipient from the drop-down so their previous six (6) months of records load on the next screen.</div>
+      </div>
       <div class="table-wrap">
         <table class="data">
           <thead><tr><th>No</th><th>Name of Recipient</th><th>Position</th><th>Company / Organization</th><th>Relationship with RGB</th><th>Official</th><th></th></tr></thead>
           <tbody>
             ${rows || `<tr class="empty-row"><td colspan="7">No recipients added yet.</td></tr>`}
-            <tr>
-              <td>${w.recipients.length + 1}</td>
-              <td colspan="6">
-                <div class="combo">
-                  <input type="text" id="recipSearch" autocomplete="off" placeholder="Find recipient"
-                    oninput="App.filterRecipient(this.value)" onfocus="App.filterRecipient(this.value)"
-                    onblur="setTimeout(()=>{const d=document.getElementById('recipComboList'); if(d) d.style.display='none';},150)">
-                  <div id="recipComboList" class="combo-list" style="display:none;"></div>
-                </div>
-              </td>
-            </tr>
           </tbody>
         </table>
       </div>
-      <div class="banner warn" style="margin-top:16px;">
-        <span>&#9888;</span>
-        <div><b>Important</b>Select the recipient from the drop-down so their previous six (6) months of records load on the next screen.</div>
+      <div class="combo" style="margin-top:14px;">
+        <input type="text" id="recipSearch" autocomplete="off" placeholder="Find recipient"
+          oninput="App.filterRecipient(this.value)" onfocus="App.filterRecipient(this.value)"
+          onblur="setTimeout(()=>{const d=document.getElementById('recipComboList'); if(d) d.style.display='none';},150)">
+        <div id="recipComboList" class="combo-list" style="display:none;"></div>
       </div>
     </div>`;
   },

@@ -147,11 +147,16 @@ table.data tr:hover td{background:#fafbff;}
 
 /* ---------- Recipient / find combo ---------- */
 .combo{position:relative;}
+.combo input[type=text]{
+  width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:7px;
+  background:#f7f8fc;color:var(--text);font-size:14px;
+}
+.combo input[type=text]:focus{outline:2px solid var(--blue);outline-offset:0;background:#fff;}
 .combo-list{
   position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);
-  border-radius:8px;box-shadow:0 10px 30px rgba(20,30,80,.15);max-height:260px;overflow-y:auto;z-index:40;margin-top:4px;
+  border-radius:8px;box-shadow:0 10px 30px rgba(20,30,80,.15);max-height:320px;overflow-y:auto;z-index:40;margin-top:4px;
 }
-.combo-list div{padding:9px 12px;font-size:13px;border-bottom:1px solid #f1f2f7;}
+.combo-list div{padding:11px 14px;font-size:14px;border-bottom:1px solid #f1f2f7;}
 .combo-list div:hover{background:var(--blue-light);}
 .combo-list .none{color:var(--text-muted);font-style:italic;}
 
