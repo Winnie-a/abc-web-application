@@ -134,7 +134,7 @@ const App = {
     else if (this.state.view === "detail") body = this.topbar() + this.renderDetailPage();
     else if (this.state.view === "approverHome") body = this.topbar() + this.renderApproverHome();
     else if (this.state.view === "settings") body = this.topbar() + this.renderSettings();
-    app.innerHTML = body + this.renderModal() + `<footer class="appfoot">ABC Application &middot; Pre-Approval, Register &amp; Claims Submission System &middot; User Manual v1.7 &middot; <a onclick="Store.resetDemo();App.render();">Reset demo data</a></footer>`;
+    app.innerHTML = body + this.renderModal() + `<footer class="appfoot">ABC Application &middot; Pre-Approval, Register &amp; Claims Submission System &middot; <a onclick="Store.resetDemo();App.render();">Reset demo data</a></footer>`;
   },
 
   topbar() {
@@ -239,7 +239,7 @@ const App = {
   renderHome() {
     return `
     <div class="home-wrap">
-      <div class="home-title">A<span class="b">B</span>C</div>
+      <div class="home-title">ABC</div>
       <div class="home-actions">
         <button class="home-btn" onclick="App.startNewRequest()">Create New<br>Request</button>
         <button class="home-btn" onclick="App.openSubmission()">Check My<br>Submission</button>
