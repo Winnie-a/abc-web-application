@@ -24,6 +24,9 @@ const msalInstance = new msal.PublicClientApplication({
   },
   cache: { cacheLocation: "sessionStorage" }
 });
+// MSAL Browser v3+ requires initialize() to resolve before any other MSAL
+// API call — every function below that touches msalInstance awaits this.
+const msalReady = msalInstance.initialize();
 
 const GRAPH_SCOPES = ["Sites.ReadWrite.All", "User.Read", "User.Read.All", "GroupMember.Read.All"]; // or Sites.Selected, see Step 2
 // User.Read.All and GroupMember.Read.All let the signed-in user's token read
@@ -41,16 +44,24 @@ const GRAPH_GROUPS = {
 };
 
 function isGraphConnected() {
-  return !!msalInstance.getActiveAccount();
+  // Synchronous by design (called from non-async code) — safe no-op if
+  // msalReady hasn't resolved yet, rather than throwing.
+  try {
+    return !!msalInstance.getActiveAccount();
+  } catch (e) {
+    return false;
+  }
 }
 
 async function signIn() {
+  await msalReady;
   const result = await msalInstance.loginPopup({ scopes: GRAPH_SCOPES });
   msalInstance.setActiveAccount(result.account);
   return result.account;
 }
 
 async function getGraphToken() {
+  await msalReady;
   const account = msalInstance.getActiveAccount();
   if (!account) throw new Error("Not signed in");
   try {
