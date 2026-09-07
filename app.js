@@ -25,6 +25,11 @@ function stageLabel(status) {
   return { not_required: "Not Required", waiting: "-", pending: "Pending", approved: "Approved", rejected: "Rejected" }[status] || "-";
 }
 
+// Admin gate for the "amend approver email" page — only these signed-in
+// Microsoft accounts ever see the Admin link/page. Add more emails here
+// (lowercase) if another person needs this later.
+const ADMIN_EMAILS = ["winnieang@rgbgames.com"];
+
 const App = {
   state: {
     session: null,
@@ -38,7 +43,7 @@ const App = {
     authBusy: false,
     dhOptions: [], // live FCPA DH group members, populated on real sign-in — see signInWithMicrosoft()
     directory: [], // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
-    authority: []  // live ABC Authority roster (CFO/COO/GCOO/MD/Compliance), populated on real sign-in
+    approvers: []  // live "ABC Authority" roster (CFO/GCOO/MD/EXCO/Compliance name+email), admin-managed
   },
 
   init() {
@@ -86,19 +91,24 @@ const App = {
     this.render();
     try {
       await signIn();
-      const [me, directory, dhOptions, hmMembers, authority] = await Promise.all([
+      const [me, directory, dhOptions, hmMembers, approvers] = await Promise.all([
         graphGetMe(),
         graphListUsers(),
         graphGetGroupMembers(GRAPH_GROUPS.FCPA_DH),
         graphGetGroupMembers(GRAPH_GROUPS.HIGHER_MANAGEMENT),
-        graphGetAuthorityList()
+        // Don't let the "ABC Authority" list (e.g. unconfirmed column
+        // names — see graph.js) block sign-in for everyone. Fall back to
+        // an empty roster and let the Admin page (or the notification
+        // email lookup in store.js) show that gap instead of the whole
+        // app becoming unusable.
+        graphGetApproverRoster().catch(e => { console.error("ABC Authority list fetch failed:", e); return []; })
       ]);
       const hmIds = new Set(hmMembers.map(u => u.graphId));
       directory.forEach(u => { u.higherManagement = hmIds.has(u.graphId); });
       me.higherManagement = hmIds.has(me.graphId);
       this.state.directory = directory;
       this.state.dhOptions = dhOptions;
-      this.state.authority = authority;
+      this.state.approvers = approvers;
       this.state.session = { mode: "staff", employee: me };
       this.state.view = "home";
     } catch (e) {
@@ -122,6 +132,15 @@ const App = {
     this.render();
   },
 
+  /* ======================= ADMIN GATE ======================= */
+
+  isAdminUser() {
+    const s = this.state.session;
+    if (!s || s.mode !== "staff" || !s.employee) return false;
+    const email = (s.employee.email || "").toLowerCase();
+    return ADMIN_EMAILS.includes(email);
+  },
+
   /* ======================= RENDER DISPATCH ======================= */
 
   render() {
@@ -134,6 +153,7 @@ const App = {
     else if (this.state.view === "detail") body = this.topbar() + this.renderDetailPage();
     else if (this.state.view === "approverHome") body = this.topbar() + this.renderApproverHome();
     else if (this.state.view === "settings") body = this.topbar() + this.renderSettings();
+    else if (this.state.view === "admin") body = this.topbar() + this.renderAdmin();
     app.innerHTML = body + this.renderModal() + `<footer class="appfoot">ABC Application &middot; Pre-Approval, Register &amp; Claims Submission System &middot; <a onclick="Store.resetDemo();App.render();">Reset demo data</a></footer>`;
   },
 
@@ -148,11 +168,129 @@ const App = {
     <div class="topbar">
       <div class="brand" onclick="App.goHome()" style="cursor:pointer">ABC <small>&nbsp;Pre-Approval &amp; Claims</small></div>
       <div class="user">
+        ${this.isAdminUser() ? `<a onclick="App.openAdmin()">Admin</a>` : ""}
         <a onclick="App.openSettings()">Notification settings</a>
         <span>${who}</span>
         <div class="avatar">${initials(nm)}</div>
         <button class="signout" onclick="App.signOut()">Sign out</button>
       </div>
+    </div>`;
+  },
+
+  /* ======================= ADMIN — manage ABC Authority roster ======================= */
+
+  openAdmin() {
+    if (!this.isAdminUser()) { this.toast("Admin access only."); return; }
+    this._adminReturnView = this.state.view;
+    this._newApprover = null;
+    this.state.view = "admin";
+    this.render();
+  },
+  backFromAdmin() {
+    this.state.view = this._adminReturnView || "home";
+    this.render();
+  },
+
+  async saveApproverRow(index, name, role, email) {
+    if (!this.isAdminUser()) { this.toast("Admin access only."); return; }
+    if (!name) { this.toast("Please enter a name."); this.render(); return; }
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) { this.toast("Please enter a valid email address."); this.render(); return; }
+    const row = this.state.approvers[index];
+    if (!row) return;
+    try {
+      await graphSaveApprover(row.id, name, role, email);
+      row.name = name; row.role = role; row.email = email;
+      this.toast("Saved " + (role || name) + ".");
+    } catch (e) {
+      this.toast("Save failed: " + (e.message || e));
+    }
+    this.render();
+  },
+
+  async deleteApproverRow(index) {
+    if (!this.isAdminUser()) { this.toast("Admin access only."); return; }
+    const row = this.state.approvers[index];
+    if (!row) return;
+    try {
+      await graphRemoveApprover(row.id);
+      this.state.approvers.splice(index, 1);
+      this.toast("Removed " + row.name + ".");
+    } catch (e) {
+      this.toast("Delete failed: " + (e.message || e));
+    }
+    this.render();
+  },
+
+  openAddApproverForm() {
+    this._newApprover = { name: "", role: "", email: "" };
+    this.render();
+  },
+  cancelAddApprover() {
+    this._newApprover = null;
+    this.render();
+  },
+  async submitAddApprover(name, role, email) {
+    if (!name) { this.toast("Please enter a name."); return; }
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) { this.toast("Please enter a valid email address."); return; }
+    try {
+      const row = await graphAddApprover(name, role, email);
+      this.state.approvers.push(row);
+      this._newApprover = null;
+      this.toast("Added " + (role || name) + ".");
+    } catch (e) {
+      this.toast("Add failed: " + (e.message || e));
+    }
+    this.render();
+  },
+
+  renderAdmin() {
+    if (!this.isAdminUser()) {
+      // Defensive: bounce anyone who isn't the admin back home, in case
+      // state.view was ever set to "admin" some other way.
+      this.state.view = "home";
+      this.render();
+      return "";
+    }
+    const rows = this.state.approvers;
+    const tableRows = rows.map((r, i) => `
+      <tr>
+        <td><input type="text" value="${esc(r.role)}" id="apRole-${i}" style="width:160px;"></td>
+        <td><input type="text" value="${esc(r.name)}" id="apName-${i}" style="width:180px;"></td>
+        <td style="min-width:240px;"><input type="email" value="${esc(r.email)}" id="apEmail-${i}"></td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-secondary btn-sm" onclick="App.saveApproverRow(${i}, document.getElementById('apName-${i}').value, document.getElementById('apRole-${i}').value, document.getElementById('apEmail-${i}').value)">Save</button>
+          <button class="btn-icon" title="Remove" onclick="App.deleteApproverRow(${i})">&#128465;</button>
+        </td>
+      </tr>`).join("");
+    const addRow = this._newApprover ? `
+      <tr>
+        <td><input type="text" id="newApRole" placeholder="e.g. CFO"></td>
+        <td><input type="text" id="newApName" placeholder="Full name"></td>
+        <td><input type="email" id="newApEmail" placeholder="name@rgbgames.com"></td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-primary btn-sm" onclick="App.submitAddApprover(document.getElementById('newApName').value, document.getElementById('newApRole').value, document.getElementById('newApEmail').value)">Add</button>
+          <button class="btn-icon" title="Cancel" onclick="App.cancelAddApprover()">&#10005;</button>
+        </td>
+      </tr>` : "";
+    return `
+    <div class="page">
+      <div class="page-header">
+        <h2>Admin &middot; Approvers</h2>
+        <button class="btn btn-secondary" onclick="App.backFromAdmin()">Back</button>
+      </div>
+      <div class="banner">
+        <span>&#128272;</span>
+        <div><b>Visible only to you</b>Manages the "ABC Authority" SharePoint list — Name and Email here are what the approval chain (CFO, GCOO, Compliance Committee, MD, EXCO...) actually notifies. Changes save straight back to SharePoint.</div>
+      </div>
+      <div class="card" style="padding:0;">
+        <div class="table-wrap">
+          <table class="data">
+            <thead><tr><th>Role</th><th>Name</th><th>Email</th><th></th></tr></thead>
+            <tbody>${tableRows || `<tr class="empty-row"><td colspan="4">No approvers yet — add one below, or check that "Sign in with Microsoft" succeeded and the "ABC Authority" list is reachable.</td></tr>`}${addRow}</tbody>
+          </table>
+        </div>
+      </div>
+      ${!this._newApprover ? `<div class="icon-btn-row" style="margin-top:14px;"><button class="btn btn-secondary btn-sm" onclick="App.openAddApproverForm()">+ Add approver</button></div>` : ""}
     </div>`;
   },
 
@@ -1275,7 +1413,7 @@ const App = {
   },
 
   modalSelectDH(m) {
-    /* Live Entra ID group members (FCPA DH) once signed in via real MSAL;
+    /* Live Entra ID group members (FCPA DH) once signed in via real MSAL,
        falls back to the static demo list for the Approver-preview flow,
        which doesn't go through signInWithMicrosoft(). */
     const dhList = this.state.dhOptions.length ? this.state.dhOptions : DEPARTMENT_HEADS;

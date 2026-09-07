@@ -375,10 +375,23 @@ const Store = {
   getByRef(refNo) { return this.state.preApprovals.find(r => r.refNo === refNo); },
 
   /* Approver notification directory — where a real email integration would
-     read addresses from. No backend is wired up in this build, so nothing
-     is actually sent; App surfaces a toast at each notify point instead. */
+     read addresses from. Resolution order:
+       1) an explicit per-name override saved via Notification Settings
+          (this browser only — see setApproverEmail/renderSettings)
+       2) the live "ABC Authority" roster, admin-managed via the Admin page
+          and backed by the real "ABC Authority" SharePoint list — the
+          actual source of truth once populated
+       3) a guessed placeholder (data.js defaultApproverEmail), same as the
+          original demo behaviour, if nothing above matches
+     No email backend is wired up in this build, so nothing is actually
+     sent yet; App surfaces a toast at each notify point using whichever of
+     the above resolves. */
   getApproverEmail(name) {
-    return (this.state.approverEmails && this.state.approverEmails[name]) || defaultApproverEmail(name);
+    if (this.state.approverEmails && this.state.approverEmails[name]) return this.state.approverEmails[name];
+    const roster = (typeof App !== "undefined" && App.state && App.state.approvers) || [];
+    const row = roster.find(r => r.name === name);
+    if (row && row.email) return row.email;
+    return defaultApproverEmail(name);
   },
   setApproverEmail(name, email) {
     if (!this.state.approverEmails) this.state.approverEmails = {};

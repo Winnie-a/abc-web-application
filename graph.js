@@ -95,18 +95,35 @@ async function getSiteId() {
 }
 
 /* -------------------------------------------------------------------------
-   Generic list CRUD (list name = the display name you gave it in SharePoint)
+   Generic list CRUD (listName = a key into LIST_IDS below when we have a
+   confirmed GUID for that list — safest, since a list's internal "name"
+   and its "displayName" can differ, e.g. "ABC Pre-Approval" the app uses
+   vs. the real internal name "ABC PreApproval", confirmed 2026-09-07 via
+   GET /sites/{siteId}/lists?$select=name,displayName,id in Graph Explorer.
+   Falls back to using listName directly as a last resort for any list not
+   yet in LIST_IDS.
    ------------------------------------------------------------------------- */
+const LIST_IDS = {
+  "ABC Pre-Approval": "2bdb3de6-b68b-49b3-bb18-8dae7525f95d",
+  "ABC Recipient Final Expenses": "388f9b55-990f-4081-8998-ba21fb549421",
+  "ABC Authority": "cd1ebc4f-3ac8-4589-8d9b-fb6251661482" // the existing list, reused as the admin-managed roster
+};
+function resolveListRef(listName) {
+  return LIST_IDS[listName] || listName;
+}
+
 async function graphListItems(listName, filterOData) {
   const siteId = await getSiteId();
+  const ref = resolveListRef(listName);
   const filter = filterOData ? `&$filter=${encodeURIComponent(filterOData)}` : "";
-  const data = await graphFetch(`/sites/${siteId}/lists/${listName}/items?expand=fields${filter}`);
+  const data = await graphFetch(`/sites/${siteId}/lists/${ref}/items?expand=fields${filter}`);
   return data.value.map(item => ({ id: item.id, ...item.fields }));
 }
 
 async function graphCreateItem(listName, fields) {
   const siteId = await getSiteId();
-  const item = await graphFetch(`/sites/${siteId}/lists/${listName}/items`, {
+  const ref = resolveListRef(listName);
+  const item = await graphFetch(`/sites/${siteId}/lists/${ref}/items`, {
     method: "POST",
     body: JSON.stringify({ fields })
   });
@@ -115,7 +132,8 @@ async function graphCreateItem(listName, fields) {
 
 async function graphUpdateItem(listName, itemId, fields) {
   const siteId = await getSiteId();
-  await graphFetch(`/sites/${siteId}/lists/${listName}/items/${itemId}/fields`, {
+  const ref = resolveListRef(listName);
+  await graphFetch(`/sites/${siteId}/lists/${ref}/items/${itemId}/fields`, {
     method: "PATCH",
     body: JSON.stringify(fields)
   });
@@ -123,7 +141,8 @@ async function graphUpdateItem(listName, itemId, fields) {
 
 async function graphDeleteItem(listName, itemId) {
   const siteId = await getSiteId();
-  await graphFetch(`/sites/${siteId}/lists/${listName}/items/${itemId}`, { method: "DELETE" });
+  const ref = resolveListRef(listName);
+  await graphFetch(`/sites/${siteId}/lists/${ref}/items/${itemId}`, { method: "DELETE" });
 }
 
 /* -------------------------------------------------------------------------
@@ -189,24 +208,42 @@ async function graphGetGroupMembers(groupId) {
 }
 
 /* -------------------------------------------------------------------------
-   ABC Authority (SharePoint list) — the live role -> person roster (CFO,
-   COO, GCOO, MD, Compliance Committee, ...), replacing hardcoded fixedName
-   values in data.js. The exact internal SharePoint field name for the
-   "Title Authority" column wasn't confirmed, so this tries a few plausible
-   variants defensively — if none match, fix the fallback chain below to
-   whatever the real internal name turns out to be (visible in a raw
-   graphListItems("ABC Authority") result).
+   ABC Authority (SharePoint list, confirmed to already exist on the site —
+   GUID in LIST_IDS above) — admin-managed roster of Name/Role/Email for the
+   fixed approval roles (CFO, GCOO, MD, EXCO Members, Compliance Committee
+   1/2, ...) that data.js currently hardcodes. Reused as-is rather than
+   creating a new list, per Winnie's call — so the exact column names on
+   THIS existing list haven't been confirmed the way a fresh list's would
+   be. mapApproverRow() below tries a couple of plausible names for the
+   "role" column defensively; if none match, run
+     GET /sites/{siteId}/lists/cd1ebc4f-3ac8-4589-8d9b-fb6251661482/items?expand=fields
+   in Graph Explorer to see this list's real field names and fix the
+   fallback chain below to match. Only the Admin page (app.js
+   isAdminUser()) reads/writes this list.
    ------------------------------------------------------------------------- */
-function mapAuthorityRow(item) {
+function mapApproverRow(item) {
   return {
+    id: item.id, // SharePoint list item id — needed to PATCH/DELETE this row
     name: item.Title,
-    email: item.Email,
-    position: item.Position,
-    tag: item.TitleAuthority || item.Title_x0020_Authority || item.Title1 || ""
+    role: item.Role || item.Position || item.TitleAuthority || item.Title_x0020_Authority || "",
+    email: item.Email
   };
 }
 
-async function graphGetAuthorityList() {
+async function graphGetApproverRoster() {
   const rows = await graphListItems("ABC Authority");
-  return rows.map(mapAuthorityRow);
+  return rows.map(mapApproverRow);
+}
+
+async function graphAddApprover(name, role, email) {
+  const item = await graphCreateItem("ABC Authority", { Title: name, Role: role, Email: email });
+  return mapApproverRow(item);
+}
+
+async function graphSaveApprover(itemId, name, role, email) {
+  await graphUpdateItem("ABC Authority", itemId, { Title: name, Role: role, Email: email });
+}
+
+async function graphRemoveApprover(itemId) {
+  await graphDeleteItem("ABC Authority", itemId);
 }
