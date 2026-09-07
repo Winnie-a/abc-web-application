@@ -5,9 +5,9 @@
 
    Approval hierarchy & thresholds below reflect "ABC Automation MVP —
    Release Planning v2.2" (Phase 2): updated DH routing for SSM/TSM,
-   Compliance Committee 1 & 2 added to the pre-approval flow, and
-   GCOO -> MD -> EXCO Members added to the claim flow, with per-tier USD
-   amount thresholds (USD 1 per tier, USD 7,500 from GCOO onward).
+   Compliance Committee 1 & 2 added to the pre-approval flow, and MD/EXCO
+   Members conditionally added to the claim flow above GCOO based on the
+   claim total — see claimChainDef() below for the confirmed thresholds.
    ========================================================================== */
 
 const CURRENT_USER = {
@@ -141,18 +141,29 @@ function orgLineFor(team) {
    Approval chains — per the "Pre-Approval Form Approval Flow" and "Claim
    Form Approval Flow" charts. Both branch on whether the requestor is
    Higher Management (see isHigherManagement): Higher Management requests
-   skip the line-manager stage(s) and start straight at CFO. Every stage in
-   the resulting chain is required, in order — no amount-based gating.
+   skip the line-manager stage(s) and start straight at CFO.
 
      Pre-Approval · Standard:   DH -> CFO -> GCOO -> Compliance Committee 1 -> Compliance Committee 2
      Pre-Approval · Higher Mgmt:      CFO -> GCOO -> Compliance Committee 1 -> Compliance Committee 2
+   Every Pre-Approval stage is required, in order — no amount-based gating.
 
-     Claim · Standard:  HOD -> SHOD -> DH -> CFO -> GCOO -> MD -> EXCO Members
-     Claim · Higher Mgmt:            CFO -> GCOO -> MD -> EXCO Members
-
-   EXCO Members is a collective sign-off stage; the roster below is shown
-   for reference wherever that stage appears.
+     Claim · Standard:  HOD -> SHOD -> DH -> CFO -> GCOO -> [MD] -> [EXCO Members]
+     Claim · Higher Mgmt:            CFO -> GCOO -> [MD] -> [EXCO Members]
+   The Claim flow DOES have amount-based gating (confirmed with Winnie
+   2026-09-07, against the total claim amount converted to USD via
+   claimActualUSD()): everyone always goes up to GCOO; MD and then EXCO
+   Members are conditionally appended on top —
+     <= USD 7,500              -> stop after GCOO
+     USD 7,501 - 25,000        -> also requires MD
+     USD 25,001 and above      -> also requires EXCO Members, where EVERY
+                                   EXCO roster member must individually
+                                   approve (not one collective sign-off) —
+                                   built below as one sequential stage per
+                                   member via excoStageDefs().
    -------------------------------------------------------------------------- */
+const CLAIM_TIER_MD_ABOVE_USD = 7500;    // above this, MD approval is also required
+const CLAIM_TIER_EXCO_ABOVE_USD = 25000; // above this, every EXCO member must also approve
+
 const EXCO_ROSTER = [
   { name: "Dato' Seri Chuah Kim Seah", title: "MD" },
   { name: "Datuk Steven Lim", title: "GCOO" },
@@ -169,9 +180,23 @@ const STAGE_DH = { title: "DH", role: "Department Head", resolve: "dh" };
 const STAGE_CFO = { title: "CFO", role: "Chief Financial Officer", fixedName: "Liew Yung Kuan" };
 const STAGE_GCOO = { title: "GCOO", role: "Group Chief Operating Officer", fixedName: "Datuk Steven Lim" };
 const STAGE_MD = { title: "MD", role: "Managing Director", fixedName: "Dato' Seri Chuah Kim Seah" };
-const STAGE_EXCO = { title: "EXCO Members", role: "EXCO Members (collective)", fixedName: "EXCO Members" };
 const STAGE_COMPLIANCE1 = { title: "Compliance Committee 1", role: "Compliance Committee 1", fixedName: "Nicole Chan" };
 const STAGE_COMPLIANCE2 = { title: "Compliance Committee 2", role: "Compliance Committee 2", fixedName: "Ganaser A/L Kaliappen" };
+
+/* One sequential approval stage per EXCO roster member (title "EXCO - MD",
+   "EXCO - GCOO", ...), so every member gets their own row in the Approver
+   Console and must individually approve — instead of a single collective
+   "EXCO Members" placeholder stage. Takes an optional live roster (shape:
+   {name, title|role}) for when the "ABC Authority" SharePoint list's real
+   schema is confirmed and can reliably tell EXCO seats apart from
+   Compliance/other authority roles; falls back to the static EXCO_ROSTER
+   (used today, since that isn't wired up yet). */
+function excoStageDefs(authorityList) {
+  const roster = (authorityList && authorityList.length)
+    ? authorityList.map(a => ({ name: a.name, title: a.tag || a.title || a.role || a.position || "EXCO" }))
+    : EXCO_ROSTER.map(e => ({ name: e.name, title: e.title }));
+  return roster.map(m => ({ title: "EXCO - " + m.title, role: "EXCO Members", fixedName: m.name }));
+}
 
 function preApprovalChainDef(higherMgmt) {
   return [
@@ -179,63 +204,15 @@ function preApprovalChainDef(higherMgmt) {
     STAGE_CFO, STAGE_GCOO, STAGE_COMPLIANCE1, STAGE_COMPLIANCE2
   ];
 }
-function claimChainDef(higherMgmt) {
-  return [
+function claimChainDef(higherMgmt, totalUSD) {
+  const chain = [
     ...(higherMgmt ? [] : [STAGE_HOD, STAGE_SHOD, STAGE_DH]),
-    STAGE_CFO, STAGE_GCOO, STAGE_MD, STAGE_EXCO
+    STAGE_CFO, STAGE_GCOO
   ];
-}
-
-/* --------------------------------------------------------------------------
-   Amount-tiered authority matrix ("FCPA Expenses", policy item 14.4) —
-   NOT YET WIRED into the live submit flow (preApprovalChainDef/claimChainDef
-   above are still what createPreApproval/submitClaim actually use). Kept as
-   a separate, self-contained set of functions until it's confirmed whether
-   this REPLACES the HOD/SHOD/DH/CFO/GCOO/Compliance chain above entirely,
-   or only applies alongside/above it.
-
-     <= $7,500     -> COO only
-     <= $25,000    -> MD only
-     <= $125,000   -> EXCO Members (every ABC Authority roster member,
-                      sequential, one at a time)
-     > $125,000    -> BOD required per policy, not built yet — falls back
-                      to the EXCO tier above and is flagged in the UI.
-
-   fixedName values below are the fallback used when no live ABC Authority
-   data is available (Approver-preview / demo mode); a real sign-in passes
-   authorityList and these are looked up live instead — see authorityName().
-   -------------------------------------------------------------------------- */
-const TIER_COO_MAX_USD = 7500;
-const TIER_MD_MAX_USD = 25000;
-const TIER_EXCO_MAX_USD = 125000;
-
-const STAGE_COO_SHORT = { title: "COO", role: "Chief Operating Officer", tag: "COO", fixedName: "Chuah Eng Meng" };
-const STAGE_MD_SHORT = { title: "MD", role: "Managing Director", tag: "MD", fixedName: "Dato' Seri Chuah Kim Seah" };
-
-function authorityName(authorityList, tag, fallbackName) {
-  const match = (authorityList || []).find(a => a.tag === tag);
-  return (match && match.name) || fallbackName;
-}
-
-/* Sequential EXCO sign-off roster: every row in the live ABC Authority list
-   (order as returned) once signed in for real; falls back to the static
-   EXCO_ROSTER for the demo/Approver-preview flow. */
-function excoStageDefs(authorityList) {
-  const roster = (authorityList && authorityList.length)
-    ? authorityList.map(a => ({ name: a.name, title: a.tag || a.position || "EXCO" }))
-    : EXCO_ROSTER.map(e => ({ name: e.name, title: e.title }));
-  return roster.map(m => ({ title: "EXCO - " + m.title, role: "EXCO Members", fixedName: m.name }));
-}
-
-function tieredChainDef(totalUSD, authorityList) {
-  if (totalUSD <= TIER_COO_MAX_USD) {
-    return [{ ...STAGE_COO_SHORT, fixedName: authorityName(authorityList, "COO", STAGE_COO_SHORT.fixedName) }];
-  }
-  if (totalUSD <= TIER_MD_MAX_USD) {
-    return [{ ...STAGE_MD_SHORT, fixedName: authorityName(authorityList, "MD", STAGE_MD_SHORT.fixedName) }];
-  }
-  // $125,000 tier, and >$125,000 falling back here until BOD is built.
-  return excoStageDefs(authorityList);
+  const amt = Number(totalUSD) || 0;
+  if (amt > CLAIM_TIER_MD_ABOVE_USD) chain.push(STAGE_MD);
+  if (amt > CLAIM_TIER_EXCO_ABOVE_USD) chain.push(...excoStageDefs());
+  return chain;
 }
 
 /* All possible approver identities an "Approver" can sign in as: every DH,
@@ -251,7 +228,11 @@ function allApproverIdentities() {
     add(line.hod, "HOD", "Head of Department");
     add(line.shod, "SHOD", "Senior Head of Department");
   });
-  [STAGE_CFO, STAGE_GCOO, STAGE_MD, STAGE_EXCO, STAGE_COMPLIANCE1, STAGE_COMPLIANCE2].forEach(s => add(s.fixedName, s.title, s.role));
+  [STAGE_CFO, STAGE_GCOO, STAGE_MD, STAGE_COMPLIANCE1, STAGE_COMPLIANCE2].forEach(s => add(s.fixedName, s.title, s.role));
+  // Every individual EXCO roster member also needs to be able to sign in as
+  // themselves and act on their own "EXCO - <role>" stage (see
+  // excoStageDefs() above) — not just the fixed CFO/GCOO/MD/Compliance roles.
+  EXCO_ROSTER.forEach(m => add(m.name, "EXCO - " + m.title, "EXCO Members"));
   return list;
 }
 
@@ -262,12 +243,13 @@ function defaultDHForEmployee(emp) {
 
 /* --------------------------------------------------------------------------
    Approver email directory
-   Used for the "who gets notified" address shown in Notification Settings.
-   This app has no backend, so nothing is actually emailed — these addresses
-   are what a real send integration (Power Automate, SendGrid, SMTP relay,
-   etc.) would read once wired up. Seed values are a placeholder guess at a
-   first.last@rgbgames.com pattern; edit them from the Notification Settings
-   screen (saved to this browser's local storage) or here in data.js.
+   The final fallback for "who gets notified" once the live "ABC Authority"
+   roster (see Store.getApproverEmail in store.js) has no match for a given
+   approver name. This app has no backend, so nothing is actually emailed —
+   these addresses are what a real send integration would read once wired
+   up. Seed values are a placeholder guess at a first.last@rgbgames.com
+   pattern; edit them here in data.js, or manage real addresses via the
+   Admin page (backed by the "ABC Authority" SharePoint list).
    -------------------------------------------------------------------------- */
 function slugEmail(name) {
   const clean = name
@@ -281,7 +263,6 @@ function slugEmail(name) {
 }
 
 const APPROVER_EMAILS_SEED = {
-  "EXCO Members": "exco-committee@rgbgames.com",
   "Board of Directors": "board-secretary@rgbgames.com"
 };
 

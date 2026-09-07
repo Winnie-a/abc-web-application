@@ -152,7 +152,6 @@ const App = {
     else if (this.state.view === "submission") body = this.topbar() + this.renderSubmission();
     else if (this.state.view === "detail") body = this.topbar() + this.renderDetailPage();
     else if (this.state.view === "approverHome") body = this.topbar() + this.renderApproverHome();
-    else if (this.state.view === "settings") body = this.topbar() + this.renderSettings();
     else if (this.state.view === "admin") body = this.topbar() + this.renderAdmin();
     app.innerHTML = body + this.renderModal() + `<footer class="appfoot">ABC Application &middot; Pre-Approval, Register &amp; Claims Submission System &middot; <a onclick="Store.resetDemo();App.render();">Reset demo data</a></footer>`;
   },
@@ -169,7 +168,6 @@ const App = {
       <div class="brand" onclick="App.goHome()" style="cursor:pointer">ABC <small>&nbsp;Pre-Approval &amp; Claims</small></div>
       <div class="user">
         ${this.isAdminUser() ? `<a onclick="App.openAdmin()">Admin</a>` : ""}
-        <a onclick="App.openSettings()">Notification settings</a>
         <span>${who}</span>
         <div class="avatar">${initials(nm)}</div>
         <button class="signout" onclick="App.signOut()">Sign out</button>
@@ -291,55 +289,6 @@ const App = {
         </div>
       </div>
       ${!this._newApprover ? `<div class="icon-btn-row" style="margin-top:14px;"><button class="btn btn-secondary btn-sm" onclick="App.openAddApproverForm()">+ Add approver</button></div>` : ""}
-    </div>`;
-  },
-
-  /* ======================= NOTIFICATION SETTINGS ======================= */
-
-  openSettings() {
-    this._settingsReturnView = this.state.view;
-    this.state.view = "settings";
-    this.render();
-  },
-  backFromSettings() {
-    this.state.view = this._settingsReturnView || (this.state.session.mode === "approver" ? "approverHome" : "home");
-    this.render();
-  },
-  saveApproverEmail(name, email) {
-    if (!email || !/^\S+@\S+\.\S+$/.test(email)) { this.toast("Please enter a valid email address."); this.render(); return; }
-    Store.setApproverEmail(name, email);
-    this.toast("Saved notification email for " + name + ".");
-  },
-
-  renderSettings() {
-    const identities = allApproverIdentities();
-    const rows = identities.map(i => `
-      <tr>
-        <td>${esc(i.name)}</td>
-        <td>${esc(i.title)} <span class="muted small">&middot; ${esc(i.role)}</span></td>
-        <td style="min-width:260px;">
-          <input type="email" value="${esc(Store.getApproverEmail(i.name))}" id="email-${esc(i.name).replace(/[^a-zA-Z0-9]/g, "")}">
-        </td>
-        <td><button class="btn btn-secondary btn-sm" onclick="App.saveApproverEmail('${esc(i.name).replace(/'/g, "\\'")}', document.getElementById('email-${esc(i.name).replace(/[^a-zA-Z0-9]/g, "")}').value)">Save</button></td>
-      </tr>`).join("");
-    return `
-    <div class="page">
-      <div class="page-header">
-        <h2>Notification Settings</h2>
-        <button class="btn btn-secondary" onclick="App.backFromSettings()">Back</button>
-      </div>
-      <div class="banner warn">
-        <span>&#9993;&#65039;</span>
-        <div><b>No email backend is connected</b>This build runs entirely in your browser, so it cannot send real email. The addresses below are exactly what a real send integration — Power Automate, SendGrid, or your SMTP relay — would read once wired up. Every time a request moves to a new approver, this app shows a toast naming who and where it would notify, using the address you set here.</div>
-      </div>
-      <div class="card" style="padding:0;">
-        <div class="table-wrap">
-          <table class="data">
-            <thead><tr><th>Approver</th><th>Role</th><th>Notification Email</th><th></th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-      </div>
     </div>`;
   },
 
@@ -1239,7 +1188,6 @@ const App = {
     const d = this.state.detail;
     const which = rec.claim ? d.approvalWhich : "preapproval";
     const stages = which === "claim" ? (rec.claim ? rec.claim.approvals : []) : rec.approvals;
-    const hasExco = stages.some(s => s.title === "EXCO Members");
     const acting = this._actingStage(rec, which);
     return `
       ${rec.claim ? `<div class="tabs" style="margin-bottom:14px;">
@@ -1256,7 +1204,6 @@ const App = {
             <td>${esc(s.comments || "-")}</td><td>${esc(s.rejectReason || "-")}</td>
           </tr>`).join("")}</tbody>
         </table></div>
-        ${hasExco ? `<p class="small muted" style="margin-top:12px;">EXCO Members roster: ${EXCO_ROSTER.map(m => `${esc(m.name)} (${esc(m.title)})`).join(", ")}.</p>` : ""}
       </div>
       ${acting !== null ? this.renderActionPanel(rec, which, acting) : ""}`;
   },

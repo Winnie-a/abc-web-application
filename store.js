@@ -74,8 +74,9 @@ function rowTotal(row) {
 /* Build a concrete chain for a record from a stage-definition list (see
    preApprovalChainDef / claimChainDef): resolves each stage's approver name
    — either a fixed name or one looked up via resolveMap (dh/hod/shod) — and
-   sets the first stage Pending, the rest Waiting. Every stage in the chosen
-   flow is required, in order; there is no amount-based gating. */
+   sets the first stage Pending, the rest Waiting. Every stage in the given
+   list is required, in order — any amount-based gating (Claim flow only;
+   see claimChainDef) has already been decided before this list was built. */
 function buildChain(stageDefs, resolveMap) {
   const stages = stageDefs.map(def => ({
     title: def.title,
@@ -211,7 +212,7 @@ function newBlankClaim(preApproval, prefill) {
       amountMYR: 620, rate: 4.2, purpose: "Client engagement", attachment: "receipt-0" + (i + 1) + ".pdf"
     }));
     claim.register.month = "June";
-    claim.approvals = buildChain(claimChainDef(isHigherManagement(preApproval.requestor)), chainResolveMap(preApproval.requestor, preApproval.departmentHead));
+    claim.approvals = buildChain(claimChainDef(isHigherManagement(preApproval.requestor), claimActualUSD(claim)), chainResolveMap(preApproval.requestor, preApproval.departmentHead));
   }
   return claim;
 }
@@ -267,7 +268,7 @@ function seedState() {
     dh: dh1, daysAgo: 60, forceStatus: "closed", withClaim: true, claimClosed: true
   });
 
-  return { preApprovals: [pending, approvedOpenClaim, closedHistory1, closedHistory2], approverEmails: {} };
+  return { preApprovals: [pending, approvedOpenClaim, closedHistory1, closedHistory2] };
 }
 
 /* First stage currently awaiting action — who a real email integration
@@ -356,7 +357,6 @@ const Store = {
       this.state = seedState();
     }
     if (!this.state || !Array.isArray(this.state.preApprovals)) this.state = seedState();
-    if (!this.state.approverEmails) this.state.approverEmails = {};
     this.save();
     return this.state;
   },
@@ -364,9 +364,7 @@ const Store = {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
   },
   resetDemo() {
-    const emails = this.state ? this.state.approverEmails : {};
     this.state = seedState();
-    this.state.approverEmails = emails || {};
     this.save();
   },
 
@@ -376,27 +374,24 @@ const Store = {
 
   /* Approver notification directory — where a real email integration would
      read addresses from. Resolution order:
-       1) an explicit per-name override saved via Notification Settings
-          (this browser only — see setApproverEmail/renderSettings)
-       2) the live "ABC Authority" roster, admin-managed via the Admin page
+       1) the live "ABC Authority" roster, admin-managed via the Admin page
           and backed by the real "ABC Authority" SharePoint list — the
           actual source of truth once populated
-       3) a guessed placeholder (data.js defaultApproverEmail), same as the
-          original demo behaviour, if nothing above matches
+       2) a guessed placeholder (data.js defaultApproverEmail), same as the
+          original demo behaviour, if no roster match is found
      No email backend is wired up in this build, so nothing is actually
      sent yet; App surfaces a toast at each notify point using whichever of
-     the above resolves. */
+     the above resolves. (The old per-browser manual override that used to
+     live here — "Notification settings" — was removed 2026-09-07: it was a
+     localStorage-only stand-in that predated the Admin page, and having
+     both meant a stale local override could silently shadow a real change
+     made in Admin. The Admin page is now the single place to change who
+     gets notified.) */
   getApproverEmail(name) {
-    if (this.state.approverEmails && this.state.approverEmails[name]) return this.state.approverEmails[name];
     const roster = (typeof App !== "undefined" && App.state && App.state.approvers) || [];
     const row = roster.find(r => r.name === name);
     if (row && row.email) return row.email;
     return defaultApproverEmail(name);
-  },
-  setApproverEmail(name, email) {
-    if (!this.state.approverEmails) this.state.approverEmails = {};
-    this.state.approverEmails[name] = email;
-    this.save();
   },
 
   async createPreApproval(draft) {
@@ -482,7 +477,7 @@ const Store = {
   submitClaim(id) {
     const rec = this.get(id);
     if (!rec || !rec.claim) return null;
-    rec.claim.approvals = buildChain(claimChainDef(isHigherManagement(rec.requestor)), chainResolveMap(rec.requestor, rec.departmentHead));
+    rec.claim.approvals = buildChain(claimChainDef(isHigherManagement(rec.requestor), claimActualUSD(rec.claim)), chainResolveMap(rec.requestor, rec.departmentHead));
     rec.claim.submittedDate = todayISO();
     this.save();
     return pendingNotifyTarget(rec.claim.approvals);
