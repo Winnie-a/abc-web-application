@@ -25,16 +25,10 @@ function stageLabel(status) {
   return { not_required: "Not Required", waiting: "-", pending: "Pending", approved: "Approved", rejected: "Rejected" }[status] || "-";
 }
 
-// Admin gate for the "amend approver email" page — only these signed-in
-// Microsoft accounts ever see the Admin link/page. Add more emails here
-// (lowercase) if another person needs this later.
-const ADMIN_EMAILS = ["winnieang@rgbgames.com"];
-
 const App = {
   state: {
     session: null,
     view: "login",
-    loginMode: "staff",
     wizard: null,
     sub: null,
     detail: null,
@@ -43,7 +37,7 @@ const App = {
     authBusy: false,
     dhOptions: [], // live FCPA DH group members, populated on real sign-in — see signInWithMicrosoft()
     directory: [], // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
-    approvers: []  // live "ABC Authority" roster (CFO/GCOO/MD/EXCO/Compliance name+email), admin-managed
+    approvers: []  // live "ABC Authority" roster (CFO/GCOO/MD/EXCO/Compliance name+email) — read-only here; edited directly in the SharePoint list
   },
 
   init() {
@@ -75,16 +69,34 @@ const App = {
   },
 
   goHome() {
-    this.state.view = this.state.session.mode === "approver" ? "approverHome" : "home";
+    this.state.view = "home";
     this.state.detail = null;
     this.render();
   },
 
-  loginStaff() {
-    this.state.session = { mode: "staff", employee: CURRENT_USER };
-    this.state.view = "home";
+  /* Whether the signed-in Microsoft account is also one of the named
+     approver roles (CFO, GCOO, MD, EXCO, Compliance Committee, DH,
+     HOD/SHOD, ...) from data.js — decides whether the Approver Console nav
+     link shows up. Replaces the old, unauthenticated "Approver sign-in"
+     picker: acting on a stage now requires actually being signed in as
+     that real person, not just selecting their name from a dropdown. */
+  isApproverUser() {
+    const s = this.state.session;
+    if (!s || !s.employee) return false;
+    return allApproverIdentities().some(i => i.name === s.employee.name);
+  },
+  approverIdentity() {
+    const s = this.state.session;
+    if (!s || !s.employee) return null;
+    const match = allApproverIdentities().find(i => i.name === s.employee.name);
+    return { name: s.employee.name, role: match ? match.role : (s.employee.position || "") };
+  },
+  openApproverConsole() {
+    if (!this.isApproverUser()) { this.toast("Your signed-in account isn't in the approver roster."); return; }
+    this.state.view = "approverHome";
     this.render();
   },
+
   async signInWithMicrosoft() {
     if (this.state.authBusy) return;
     this.state.authBusy = true;
@@ -109,7 +121,7 @@ const App = {
       this.state.directory = directory;
       this.state.dhOptions = dhOptions;
       this.state.approvers = approvers;
-      this.state.session = { mode: "staff", employee: me };
+      this.state.session = { employee: me };
       this.state.view = "home";
     } catch (e) {
       this.toast("Sign-in failed: " + (e.message || e));
@@ -117,28 +129,6 @@ const App = {
       this.state.authBusy = false;
       this.render();
     }
-  },
-  loginApprover() {
-    const sel = document.getElementById("approverIdentitySelect");
-    const name = sel ? sel.value : "";
-    const identity = allApproverIdentities().find(i => i.name === name);
-    if (!identity) { this.toast("Please choose an approver identity."); return; }
-    this.state.session = { mode: "approver", identity };
-    this.state.view = "approverHome";
-    this.render();
-  },
-  setLoginMode(mode) {
-    this.state.loginMode = mode;
-    this.render();
-  },
-
-  /* ======================= ADMIN GATE ======================= */
-
-  isAdminUser() {
-    const s = this.state.session;
-    if (!s || s.mode !== "staff" || !s.employee) return false;
-    const email = (s.employee.email || "").toLowerCase();
-    return ADMIN_EMAILS.includes(email);
   },
 
   /* ======================= RENDER DISPATCH ======================= */
@@ -152,171 +142,36 @@ const App = {
     else if (this.state.view === "submission") body = this.topbar() + this.renderSubmission();
     else if (this.state.view === "detail") body = this.topbar() + this.renderDetailPage();
     else if (this.state.view === "approverHome") body = this.topbar() + this.renderApproverHome();
-    else if (this.state.view === "admin") body = this.topbar() + this.renderAdmin();
     app.innerHTML = body + this.renderModal() + `<footer class="appfoot">ABC Application &middot; Pre-Approval, Register &amp; Claims Submission System &middot; <a onclick="Store.resetDemo();App.render();">Reset demo data</a></footer>`;
   },
 
   topbar() {
     const s = this.state.session;
     if (!s) return "";
-    const who = s.mode === "staff"
-      ? `${esc(s.employee.name)} <span class="muted">&middot; ${esc(s.employee.employeeNo)}</span>`
-      : `${esc(s.identity.name)} <span class="muted">&middot; ${esc(s.identity.role)}</span>`;
-    const nm = s.mode === "staff" ? s.employee.name : s.identity.name;
+    const who = `${esc(s.employee.name)} <span class="muted">&middot; ${esc(s.employee.employeeNo)}</span>`;
     return `
     <div class="topbar">
       <div class="brand" onclick="App.goHome()" style="cursor:pointer">ABC <small>&nbsp;Pre-Approval &amp; Claims</small></div>
       <div class="user">
-        ${this.isAdminUser() ? `<a onclick="App.openAdmin()">Admin</a>` : ""}
+        ${this.isApproverUser() ? `<a onclick="App.openApproverConsole()">Approver Console</a>` : ""}
         <span>${who}</span>
-        <div class="avatar">${initials(nm)}</div>
+        <div class="avatar">${initials(s.employee.name)}</div>
         <button class="signout" onclick="App.signOut()">Sign out</button>
       </div>
-    </div>`;
-  },
-
-  /* ======================= ADMIN — manage ABC Authority roster ======================= */
-
-  openAdmin() {
-    if (!this.isAdminUser()) { this.toast("Admin access only."); return; }
-    this._adminReturnView = this.state.view;
-    this._newApprover = null;
-    this.state.view = "admin";
-    this.render();
-  },
-  backFromAdmin() {
-    this.state.view = this._adminReturnView || "home";
-    this.render();
-  },
-
-  async saveApproverRow(index, name, role, email) {
-    if (!this.isAdminUser()) { this.toast("Admin access only."); return; }
-    if (!name) { this.toast("Please enter a name."); this.render(); return; }
-    if (!email || !/^\S+@\S+\.\S+$/.test(email)) { this.toast("Please enter a valid email address."); this.render(); return; }
-    const row = this.state.approvers[index];
-    if (!row) return;
-    try {
-      await graphSaveApprover(row.id, name, role, email);
-      row.name = name; row.role = role; row.email = email;
-      this.toast("Saved " + (role || name) + ".");
-    } catch (e) {
-      this.toast("Save failed: " + (e.message || e));
-    }
-    this.render();
-  },
-
-  async deleteApproverRow(index) {
-    if (!this.isAdminUser()) { this.toast("Admin access only."); return; }
-    const row = this.state.approvers[index];
-    if (!row) return;
-    try {
-      await graphRemoveApprover(row.id);
-      this.state.approvers.splice(index, 1);
-      this.toast("Removed " + row.name + ".");
-    } catch (e) {
-      this.toast("Delete failed: " + (e.message || e));
-    }
-    this.render();
-  },
-
-  openAddApproverForm() {
-    this._newApprover = { name: "", role: "", email: "" };
-    this.render();
-  },
-  cancelAddApprover() {
-    this._newApprover = null;
-    this.render();
-  },
-  async submitAddApprover(name, role, email) {
-    if (!name) { this.toast("Please enter a name."); return; }
-    if (!email || !/^\S+@\S+\.\S+$/.test(email)) { this.toast("Please enter a valid email address."); return; }
-    try {
-      const row = await graphAddApprover(name, role, email);
-      this.state.approvers.push(row);
-      this._newApprover = null;
-      this.toast("Added " + (role || name) + ".");
-    } catch (e) {
-      this.toast("Add failed: " + (e.message || e));
-    }
-    this.render();
-  },
-
-  renderAdmin() {
-    if (!this.isAdminUser()) {
-      // Defensive: bounce anyone who isn't the admin back home, in case
-      // state.view was ever set to "admin" some other way.
-      this.state.view = "home";
-      this.render();
-      return "";
-    }
-    const rows = this.state.approvers;
-    const tableRows = rows.map((r, i) => `
-      <tr>
-        <td><input type="text" value="${esc(r.role)}" id="apRole-${i}" style="width:160px;"></td>
-        <td><input type="text" value="${esc(r.name)}" id="apName-${i}" style="width:180px;"></td>
-        <td style="min-width:240px;"><input type="email" value="${esc(r.email)}" id="apEmail-${i}"></td>
-        <td style="white-space:nowrap;">
-          <button class="btn btn-secondary btn-sm" onclick="App.saveApproverRow(${i}, document.getElementById('apName-${i}').value, document.getElementById('apRole-${i}').value, document.getElementById('apEmail-${i}').value)">Save</button>
-          <button class="btn-icon" title="Remove" onclick="App.deleteApproverRow(${i})">&#128465;</button>
-        </td>
-      </tr>`).join("");
-    const addRow = this._newApprover ? `
-      <tr>
-        <td><input type="text" id="newApRole" placeholder="e.g. CFO"></td>
-        <td><input type="text" id="newApName" placeholder="Full name"></td>
-        <td><input type="email" id="newApEmail" placeholder="name@rgbgames.com"></td>
-        <td style="white-space:nowrap;">
-          <button class="btn btn-primary btn-sm" onclick="App.submitAddApprover(document.getElementById('newApName').value, document.getElementById('newApRole').value, document.getElementById('newApEmail').value)">Add</button>
-          <button class="btn-icon" title="Cancel" onclick="App.cancelAddApprover()">&#10005;</button>
-        </td>
-      </tr>` : "";
-    return `
-    <div class="page">
-      <div class="page-header">
-        <h2>Admin &middot; Approvers</h2>
-        <button class="btn btn-secondary" onclick="App.backFromAdmin()">Back</button>
-      </div>
-      <div class="banner">
-        <span>&#128272;</span>
-        <div><b>Visible only to you</b>Manages the "ABC Authority" SharePoint list — Name and Email here are what the approval chain (CFO, GCOO, Compliance Committee, MD, EXCO...) actually notifies. Changes save straight back to SharePoint.</div>
-      </div>
-      <div class="card" style="padding:0;">
-        <div class="table-wrap">
-          <table class="data">
-            <thead><tr><th>Role</th><th>Name</th><th>Email</th><th></th></tr></thead>
-            <tbody>${tableRows || `<tr class="empty-row"><td colspan="4">No approvers yet — add one below, or check that "Sign in with Microsoft" succeeded and the "ABC Authority" list is reachable.</td></tr>`}${addRow}</tbody>
-          </table>
-        </div>
-      </div>
-      ${!this._newApprover ? `<div class="icon-btn-row" style="margin-top:14px;"><button class="btn btn-secondary btn-sm" onclick="App.openAddApproverForm()">+ Add approver</button></div>` : ""}
     </div>`;
   },
 
   /* ======================= LOGIN ======================= */
 
   renderLogin() {
-    const mode = this.state.loginMode;
-    const approverOptions = allApproverIdentities().map(i => `<option value="${esc(i.name)}">${esc(i.name)} &middot; ${esc(i.title)}</option>`).join("");
     return `
     <div class="login-wrap">
       <div class="login-card">
         <h1>ABC</h1>
         <p class="sub">Pre-Approval, Register &amp; Claims Submission System</p>
-        <div class="tabs" style="justify-content:center;border-bottom:none;margin-bottom:6px;">
-          <a class="tab ${mode === "staff" ? "active" : ""}" onclick="App.setLoginMode('staff')">Staff sign-in</a>
-          <a class="tab ${mode === "approver" ? "active" : ""}" onclick="App.setLoginMode('approver')">Approver sign-in</a>
-        </div>
-        ${mode === "staff" ? `
-          <p class="small muted" style="text-align:left;margin:0 0 20px;">Sign in with your corporate Microsoft account to continue.</p>
-          <button class="btn btn-primary" style="width:100%;" onclick="App.signInWithMicrosoft()" ${this.state.authBusy ? "disabled" : ""}>${this.state.authBusy ? "Signing in&hellip;" : "Sign in with Microsoft"}</button>
-        ` : `
-          <label>Sign in as</label>
-          <select id="approverIdentitySelect">${approverOptions}</select>
-          <button class="btn btn-primary" style="width:100%;margin-top:24px;" onclick="App.loginApprover()">Continue to Approver Console</button>
-        `}
-        <div class="hint">${mode === "staff"
-          ? "Uses your real Microsoft 365 sign-in and directory profile."
-          : "Demo build &mdash; approver identity is still a manual picker, since only the Department Head roster is wired to a live Entra ID group so far."}</div>
+        <p class="small muted" style="text-align:left;margin:20px 0 20px;">Sign in with your corporate Microsoft account to continue. If you're an approver (CFO, GCOO, MD, EXCO, Compliance Committee, Department Head, HOD/SHOD...), signing in also unlocks your Approver Console automatically — there's no separate approver sign-in anymore.</p>
+        <button class="btn btn-primary" style="width:100%;" onclick="App.signInWithMicrosoft()" ${this.state.authBusy ? "disabled" : ""}>${this.state.authBusy ? "Signing in&hellip;" : "Sign in with Microsoft"}</button>
+        <div class="hint">Uses your real Microsoft 365 sign-in and directory profile.</div>
       </div>
     </div>`;
   },
@@ -450,8 +305,8 @@ const App = {
     </div>`;
   },
   requestorDirectory() {
-    // Live Entra ID directory once signed in via real MSAL; falls back to
-    // the static demo list for the Approver-preview flow.
+    // Live Entra ID directory, populated on sign-in; falls back to the
+    // static EMPLOYEES list only if that fetch somehow came back empty.
     return this.state.directory.length ? this.state.directory : EMPLOYEES;
   },
   filterRequestor(q) {
@@ -1208,11 +1063,16 @@ const App = {
       ${acting !== null ? this.renderActionPanel(rec, which, acting) : ""}`;
   },
 
+  /* Real-name match against the signed-in Microsoft account — this is the
+     actual authorization check for approving/rejecting a stage. Anyone
+     signed in can see this page (approver review is not secret), but only
+     the real person named on the currently-pending stage gets the
+     Approve/Reject panel. */
   _actingStage(rec, which) {
     const s = this.state.session;
-    if (!s || s.mode !== "approver") return null;
+    if (!s || !s.employee) return null;
     const stages = which === "claim" ? (rec.claim ? rec.claim.approvals : []) : rec.approvals;
-    const idx = stages.findIndex(st => st.status === "pending" && st.name === s.identity.name);
+    const idx = stages.findIndex(st => st.status === "pending" && st.name === s.employee.name);
     return idx >= 0 ? idx : null;
   },
 
@@ -1252,7 +1112,14 @@ const App = {
   /* ======================= APPROVER CONSOLE ======================= */
 
   renderApproverHome() {
-    const identity = this.state.session.identity;
+    if (!this.isApproverUser()) {
+      // Defensive: bounce anyone who isn't in the approver roster back home,
+      // in case state.view was ever set to "approverHome" some other way.
+      this.state.view = "home";
+      this.render();
+      return "";
+    }
+    const identity = this.approverIdentity();
     const queue = Store.approverQueue(identity);
     const rows = queue.map(item => {
       const totalUSD = item.flow === "claim" ? claimActualUSD(item.rec.claim) : computePreApprovalTotalUSD(item.rec);
@@ -1360,9 +1227,10 @@ const App = {
   },
 
   modalSelectDH(m) {
-    /* Live Entra ID group members (FCPA DH) once signed in via real MSAL,
-       falls back to the static demo list for the Approver-preview flow,
-       which doesn't go through signInWithMicrosoft(). */
+    /* Live Entra ID group members (FCPA DH), populated on sign-in — falls
+       back to the static DEPARTMENT_HEADS list only if that fetch somehow
+       came back empty (there's no unauthenticated demo/preview sign-in
+       anymore that would skip signInWithMicrosoft() entirely). */
     const dhList = this.state.dhOptions.length ? this.state.dhOptions : DEPARTMENT_HEADS;
     return `<div class="modal-overlay" onmousedown="if(event.target===this) App.closeModal()">
       <div class="modal">
