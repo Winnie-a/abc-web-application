@@ -279,6 +279,8 @@ const App = {
   },
 
   renderTabA(w) {
+    const me = this.state.session.employee;
+    const onBehalf = w.requestor.name && w.requestor.name !== me.name;
     return `
     <div class="card">
       <div class="field-grid">
@@ -301,7 +303,12 @@ const App = {
           <label>Position</label>
           <input type="text" value="${esc(w.requestor.position)}" disabled>
         </div>
+        <div class="field">
+          <label>Submitted By <span class="sub-label">(your signed-in account)</span></label>
+          <input type="text" value="${esc(me.name)}" disabled>
+        </div>
       </div>
+      ${onBehalf ? `<div class="banner" style="margin-top:14px;"><span>&#8505;&#65039;</span><div><b>Submitting on behalf of ${esc(w.requestor.name)}</b>Your account (${esc(me.name)}) is recorded as the submitter; ${esc(w.requestor.name)} stays the requestor on this form and is who the approval flow evaluates (e.g. for Higher Management routing).</div></div>` : ""}
     </div>`;
   },
   requestorDirectory() {
@@ -673,6 +680,7 @@ const App = {
       <tr>
         <td><a class="ref-link" onclick="App.openDetail('${r.id}','preapproval')">${esc(r.refNo)}</a></td>
         <td>${esc(r.requestor.name)}</td>
+        <td>${esc(r.submittedBy || r.requestor.name)}</td>
         <td>${fmtDate(r.dateSubmitted)}</td>
         <td><span class="pill ${pillClass(r.status)}">${esc(r.status)}</span></td>
         <td>
@@ -685,8 +693,8 @@ const App = {
     <div class="card" style="padding:0;">
       <div class="table-wrap">
         <table class="data">
-          <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Date Submitted</th><th>Pre-Approval Status</th><th>Action</th></tr></thead>
-          <tbody>${rows || `<tr class="empty-row"><td colspan="5">No pre-approval submissions found.</td></tr>`}</tbody>
+          <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Submitted By</th><th>Date Submitted</th><th>Pre-Approval Status</th><th>Action</th></tr></thead>
+          <tbody>${rows || `<tr class="empty-row"><td colspan="6">No pre-approval submissions found.</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
@@ -701,6 +709,7 @@ const App = {
       return `<tr>
         <td><a class="ref-link" onclick="App.openDetail('${r.id}','claim')">${esc(r.refNo)}</a></td>
         <td>${esc(r.requestor.name)}</td>
+        <td>${esc(r.submittedBy || r.requestor.name)}</td>
         <td>${fmtDate(r.dateSubmitted)}</td>
         <td><span class="pill ${pillClass(cs)}">${esc(cs)}</span></td>
         <td><button class="btn-icon" title="Open" onclick="App.openDetail('${r.id}','claim')">&#128065;</button></td>
@@ -718,8 +727,8 @@ const App = {
     <div class="card" style="padding:0;">
       <div class="table-wrap">
         <table class="data">
-          <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Date Submitted</th><th>Claim Status</th><th>Action</th></tr></thead>
-          <tbody>${rows || `<tr class="empty-row"><td colspan="5">No claims to work on yet — approved pre-approvals appear here.</td></tr>`}</tbody>
+          <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Submitted By</th><th>Date Submitted</th><th>Claim Status</th><th>Action</th></tr></thead>
+          <tbody>${rows || `<tr class="empty-row"><td colspan="6">No claims to work on yet — approved pre-approvals appear here.</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
@@ -734,6 +743,7 @@ const App = {
       <tr>
         <td><a class="ref-link" onclick="App.openDetail('${r.id}','history')">${esc(r.refNo)}</a></td>
         <td>${esc(r.requestor.name)}</td>
+        <td>${esc(r.submittedBy || r.requestor.name)}</td>
         <td>${fmtDate(r.dateSubmitted)}</td>
         <td><span class="pill ${pillClass(r.status)}">${esc(r.status)}</span></td>
         <td><span class="pill ${pillClass(r.claim ? r.claim.status : "-")}">${esc(r.claim ? r.claim.status : "-")}</span></td>
@@ -756,8 +766,8 @@ const App = {
     <div class="card" style="padding:0;">
       <div class="table-wrap">
         <table class="data">
-          <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Date Submitted</th><th>Pre-Approval Status</th><th>Claim Status</th><th>Action</th></tr></thead>
-          <tbody>${rows || `<tr class="empty-row"><td colspan="6">No closed or rejected submissions yet.</td></tr>`}</tbody>
+          <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Submitted By</th><th>Date Submitted</th><th>Pre-Approval Status</th><th>Claim Status</th><th>Action</th></tr></thead>
+          <tbody>${rows || `<tr class="empty-row"><td colspan="7">No closed or rejected submissions yet.</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
@@ -854,12 +864,16 @@ const App = {
     const tabs = [["A", "Requestor Info"], ["B", "Recipient(s) Info"], ["C", "6-Month Record"], ["D", "Transaction Details"], ["E", "Payment Amounts"], ["F", "Remarks"]];
     let body = "";
     if (d.paTab === "A") {
+      const onBehalf = rec.submittedBy && rec.submittedBy !== rec.requestor.name;
       body = `<div class="card"><div class="field-grid">
         <div class="field"><label>Name of Requestor</label><div class="readonly-box">${esc(rec.requestor.name)}</div></div>
         <div class="field"><label>Employee No</label><div class="readonly-box">${esc(rec.requestor.employeeNo)}</div></div>
         <div class="field"><label>Department</label><div class="readonly-box">${esc(rec.requestor.department)}</div></div>
         <div class="field"><label>Position</label><div class="readonly-box">${esc(rec.requestor.position)}</div></div>
-      </div></div>`;
+        <div class="field"><label>Submitted By</label><div class="readonly-box">${esc(rec.submittedBy || rec.requestor.name)}</div></div>
+      </div>
+      ${onBehalf ? `<p class="small muted" style="margin-top:12px;">Submitted on behalf of ${esc(rec.requestor.name)} by ${esc(rec.submittedBy)}.</p>` : ""}
+      </div>`;
     } else if (d.paTab === "B") {
       body = `<div class="card"><div class="table-wrap"><table class="data">
         <thead><tr><th>No</th><th>Name of Recipient</th><th>Position</th><th>Company / Organization</th><th>Relationship</th><th>Official</th></tr></thead>
@@ -911,6 +925,7 @@ const App = {
         <div class="field"><label>ABC No</label><div class="readonly-box">${esc(rec.refNo)}</div></div>
         <div class="field"><label>Position</label><div class="readonly-box">${esc(rec.requestor.position)}</div></div>
         <div class="field"><label>Name</label><div class="readonly-box">${esc(rec.requestor.name)}</div></div>
+        <div class="field"><label>Submitted By</label><div class="readonly-box">${esc(rec.submittedBy || rec.requestor.name)}</div></div>
         <div class="field">
           <label>Cost To Be Bear By Which Company <span class="req">*</span></label>
           ${editable ? `<select onchange="App.saveClaimField('costBearBy',this.value)"><option value="">Select a company</option>${COMPANIES.map(co => `<option ${c.costBearBy === co ? "selected" : ""}>${co}</option>`).join("")}</select>` : `<div class="readonly-box">${esc(c.costBearBy || "-")}</div>`}
@@ -1126,6 +1141,7 @@ const App = {
       return `<tr>
         <td>${esc(item.rec.refNo)}</td>
         <td>${esc(item.rec.requestor.name)}</td>
+        <td>${esc(item.rec.submittedBy || item.rec.requestor.name)}</td>
         <td>${item.flow === "claim" ? "Claim Form" : "Pre-Approval Form"}</td>
         <td>${esc(item.stage.title)}</td>
         <td>&asymp; USD ${fmtMoney(totalUSD)}</td>
@@ -1143,8 +1159,8 @@ const App = {
       <div class="card" style="padding:0;">
         <div class="table-wrap">
           <table class="data">
-            <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Flow</th><th>Stage</th><th>Amount</th><th>Date Submitted</th><th>Action</th></tr></thead>
-            <tbody>${rows || `<tr class="empty-row"><td colspan="7">Nothing awaiting your approval right now.</td></tr>`}</tbody>
+            <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Submitted By</th><th>Flow</th><th>Stage</th><th>Amount</th><th>Date Submitted</th><th>Action</th></tr></thead>
+            <tbody>${rows || `<tr class="empty-row"><td colspan="8">Nothing awaiting your approval right now.</td></tr>`}</tbody>
           </table>
         </div>
       </div>

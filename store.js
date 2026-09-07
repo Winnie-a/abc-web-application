@@ -315,6 +315,7 @@ async function pushPreApprovalToSharePoint(rec) {
   const fields = {
     FCPANo: rec.refNo,
     NameofRequestor: rec.requestor.name,
+    SubmittedBy: rec.submittedBy || rec.requestor.name, // who actually filled in and submitted the form — may differ from the requestor (e.g. an assistant submitting on behalf of the COO)
     EmployeeNo: rec.requestor.employeeNo,
     Department: rec.requestor.department,
     Position: rec.requestor.position,

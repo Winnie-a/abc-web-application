@@ -40,7 +40,7 @@ const GRAPH_SCOPES = ["Sites.ReadWrite.All", "User.Read", "User.Read.All", "Grou
 // find each group's Object Id on its "Overview" page in the Azure Portal.
 const GRAPH_GROUPS = {
   FCPA_DH: "0f4b2a0c-b245-4b04-82b6-b3d16bbb29c6",         // "FCPA DH" — Department Head roster
-  HIGHER_MANAGEMENT: "a125a4bc-7645-4ef7-910c-2fbbb9261642" // "FCPA Higher Management" — skips DH, straight to CFO
+  HIGHER_MANAGEMENT: "a125a4bc-7645-4ef7-910c-2fbbb9261642" // "ABC High Management" — skips DH, straight to CFO
 };
 
 function isGraphConnected() {
@@ -208,22 +208,23 @@ async function graphGetGroupMembers(groupId) {
 }
 
 /* -------------------------------------------------------------------------
-   ABC Authority (SharePoint list, confirmed to already exist on the site —
-   GUID in LIST_IDS above) — admin-managed roster of Name/Role/Email for the
-   fixed approval roles (CFO, GCOO, MD, EXCO Members, Compliance Committee
-   1/2, ...) that data.js currently hardcodes. Reused as-is rather than
-   creating a new list, per Winnie's call — so the exact column names on
-   THIS existing list haven't been confirmed the way a fresh list's would
-   be. mapApproverRow() below tries a couple of plausible names for the
-   "role" column defensively; if none match, run
+   ABC Authority (SharePoint list, already existed on the site before this
+   app — GUID in LIST_IDS above) — read-only roster of Name/Role/Email for
+   the fixed approval roles (CFO, GCOO, MD, EXCO Members, Compliance
+   Committee 1/2, ...) that data.js otherwise hardcodes. There is no
+   in-app admin UI for this list (removed 2026-09-07) — manage rows
+   directly in SharePoint's own list view; the app just reads it on sign-in
+   (see App.state.approvers / Store.getApproverEmail). The exact column
+   names on this list still haven't been confirmed, so mapApproverRow()
+   below tries a couple of plausible names for the "role" column
+   defensively; if none match, run
      GET /sites/{siteId}/lists/cd1ebc4f-3ac8-4589-8d9b-fb6251661482/items?expand=fields
    in Graph Explorer to see this list's real field names and fix the
-   fallback chain below to match. Only the Admin page (app.js
-   isAdminUser()) reads/writes this list.
+   fallback chain below to match.
    ------------------------------------------------------------------------- */
 function mapApproverRow(item) {
   return {
-    id: item.id, // SharePoint list item id — needed to PATCH/DELETE this row
+    id: item.id, // SharePoint list item id, kept for reference though nothing writes to this list from the app anymore
     name: item.Title,
     role: item.Role || item.Position || item.TitleAuthority || item.Title_x0020_Authority || "",
     email: item.Email
@@ -233,17 +234,4 @@ function mapApproverRow(item) {
 async function graphGetApproverRoster() {
   const rows = await graphListItems("ABC Authority");
   return rows.map(mapApproverRow);
-}
-
-async function graphAddApprover(name, role, email) {
-  const item = await graphCreateItem("ABC Authority", { Title: name, Role: role, Email: email });
-  return mapApproverRow(item);
-}
-
-async function graphSaveApprover(itemId, name, role, email) {
-  await graphUpdateItem("ABC Authority", itemId, { Title: name, Role: role, Email: email });
-}
-
-async function graphRemoveApprover(itemId) {
-  await graphDeleteItem("ABC Authority", itemId);
 }
