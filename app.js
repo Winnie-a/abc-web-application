@@ -37,7 +37,8 @@ const App = {
     authBusy: false,
     dhOptions: [], // live FCPA DH group members, populated on real sign-in — see signInWithMicrosoft()
     directory: [], // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
-    approvers: []  // live "ABC Authority" roster (CFO/GCOO/MD/EXCO/Compliance name+email) — read-only here; edited directly in the SharePoint list
+    approvers: [], // live "ABC Authority" roster (CFO/GCOO/MD/EXCO/Compliance name+email) — read-only here; edited directly in the SharePoint list
+    recipients: [] // live "FCPA Customer" roster (recipient name/position/company/relationship), populated on real sign-in — see signInWithMicrosoft()
   },
 
   init() {
@@ -103,7 +104,7 @@ const App = {
     this.render();
     try {
       await signIn();
-      const [me, directory, dhOptions, hmMembers, approvers] = await Promise.all([
+      const [me, directory, dhOptions, hmMembers, approvers, recipients] = await Promise.all([
         graphGetMe(),
         graphListUsers(),
         graphGetGroupMembers(GRAPH_GROUPS.FCPA_DH),
@@ -113,7 +114,12 @@ const App = {
         // an empty roster and let the Admin page (or the notification
         // email lookup in store.js) show that gap instead of the whole
         // app becoming unusable.
-        graphGetApproverRoster().catch(e => { console.error("ABC Authority list fetch failed:", e); return []; })
+        graphGetApproverRoster().catch(e => { console.error("ABC Authority list fetch failed:", e); return []; }),
+        // Same defensive fallback for "FCPA Customer" — recipientDirectory()
+        // below falls back to the static RECIPIENTS list in data.js if this
+        // comes back empty, so a fetch failure degrades gracefully instead
+        // of blocking sign-in or emptying the recipient picker.
+        graphGetRecipientDirectory().catch(e => { console.error("FCPA Customer list fetch failed:", e); return []; })
       ]);
       const hmIds = new Set(hmMembers.map(u => u.graphId));
       directory.forEach(u => { u.higherManagement = hmIds.has(u.graphId); });
@@ -121,6 +127,7 @@ const App = {
       this.state.directory = directory;
       this.state.dhOptions = dhOptions;
       this.state.approvers = approvers;
+      this.state.recipients = recipients;
       this.state.session = { employee: me };
       this.state.view = "home";
     } catch (e) {
@@ -381,20 +388,41 @@ const App = {
       </div>
     </div>`;
   },
+  recipientDirectory() {
+    // Live "FCPA Customer" SharePoint list, populated on sign-in — falls
+    // back to the static RECIPIENTS list in data.js only if that fetch
+    // somehow came back empty (mirrors requestorDirectory() above).
+    return this.state.recipients.length ? this.state.recipients : RECIPIENTS;
+  },
   filterRecipient(q) {
     const list = document.getElementById("recipComboList");
     if (!list) return;
+    const dir = this.recipientDirectory();
     const already = new Set(this.state.wizard.recipients.map(r => r.name + "|" + r.company));
-    const items = RECIPIENTS.filter(r => !already.has(r.name + "|" + r.company) && (r.name.toLowerCase().includes((q || "").toLowerCase()) || r.company.toLowerCase().includes((q || "").toLowerCase())));
+    const items = dir.filter(r => !already.has(r.name + "|" + r.company) && (r.name.toLowerCase().includes((q || "").toLowerCase()) || r.company.toLowerCase().includes((q || "").toLowerCase())));
     list.innerHTML = items.length
-      ? items.map((r, i) => `<div onmousedown="App.pickRecipient(${RECIPIENTS.indexOf(r)})">${esc(r.company)} | ${esc(r.name)} <span class="muted small">&middot; ${esc(r.position)}</span></div>`).join("")
+      ? items.map((r, i) => `<div onmousedown="App.pickRecipient(${dir.indexOf(r)})">${esc(r.company)} | ${esc(r.name)} <span class="muted small">&middot; ${esc(r.position)}</span></div>`).join("")
       : `<div class="none">No matching recipient &mdash; try "Can't find the recipient? Click here"</div>`;
     list.style.display = "block";
   },
   pickRecipient(idx) {
-    const r = RECIPIENTS[idx];
+    const r = this.recipientDirectory()[idx];
     if (!r) return;
-    this.state.wizard.recipients.push({ name: r.name, position: r.position, company: r.company, relationship: "", isOfficial: "No" });
+    this.state.wizard.recipients.push({
+      name: r.name, position: r.position, company: r.company,
+      // FCPA Customer rows carry real relationship/official values — prefill
+      // from them when present (still user-editable via the dropdowns);
+      // the static RECIPIENTS fallback has neither field, so this defaults
+      // the same way it always did (blank / "No") for that path.
+      relationship: RELATIONSHIP_OPTIONS.includes(r.relationship) ? r.relationship : "",
+      isOfficial: r.isOfficial === "Yes" ? "Yes" : "No",
+      // Carries the real FCPA Customer SharePoint item id through when the
+      // pick came from the live directory (null for the static RECIPIENTS
+      // fallback, which has no such id) — not used yet, but this is what
+      // pushPreApprovalToSharePoint()'s RecipientID linkage (store.js) will
+      // read once the "ABC Recipient Final Expenses" schema is confirmed.
+      recipientId: r.id || null
+    });
     const s = document.getElementById("recipSearch");
     if (s) s.value = "";
     this.render();

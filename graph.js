@@ -106,7 +106,8 @@ async function getSiteId() {
 const LIST_IDS = {
   "ABC Pre-Approval": "2bdb3de6-b68b-49b3-bb18-8dae7525f95d",
   "ABC Recipient Final Expenses": "388f9b55-990f-4081-8998-ba21fb549421",
-  "ABC Authority": "cd1ebc4f-3ac8-4589-8d9b-fb6251661482" // the existing list, reused as the admin-managed roster
+  "ABC Authority": "cd1ebc4f-3ac8-4589-8d9b-fb6251661482", // the existing list, reused as the admin-managed roster
+  "FCPA Customer": "632cdbed-11bb-460c-9a4e-8f885cf626b4"  // real, populated recipient master (replaces the hardcoded RECIPIENTS array in data.js)
 };
 function resolveListRef(listName) {
   return LIST_IDS[listName] || listName;
@@ -234,4 +235,32 @@ function mapApproverRow(item) {
 async function graphGetApproverRoster() {
   const rows = await graphListItems("ABC Authority");
   return rows.map(mapApproverRow);
+}
+
+/* -------------------------------------------------------------------------
+   FCPA Customer (SharePoint list, already existed on the site before this
+   app — GUID in LIST_IDS above) — the real, populated recipient master
+   Winnie's team already maintains in SharePoint (this is what the "Name of
+   Recipient" search in Tab B should pull from, replacing the hardcoded
+   RECIPIENTS array in data.js). Read-only from this app — add/edit rows
+   directly in SharePoint's own list view. Column names confirmed
+   2026-09-08 via Graph Explorer:
+     GET /sites/{siteId}/lists/632cdbed-11bb-460c-9a4e-8f885cf626b4/items?expand=fields
+   Unlike ABC Authority, this list's internal name matches its display name
+   exactly ("FCPA Customer"), so there's no name/displayName mismatch risk.
+   ------------------------------------------------------------------------- */
+function mapRecipientRow(item) {
+  return {
+    id: item.id,                                  // SharePoint list item id — a stable reference, usable as the RecipientID this app's Recipient Final Expenses push still needs (see store.js)
+    name: item.Title || "",
+    position: item.Position || "",
+    company: item.Company_x002f_Organization || "", // internal name for "Company/Organization"
+    relationship: item.RelationshipwithRGB || "",  // e.g. "Customer" — matches RELATIONSHIP_OPTIONS in data.js when populated
+    isOfficial: item.Official || "No"
+  };
+}
+
+async function graphGetRecipientDirectory() {
+  const rows = await graphListItems("FCPA Customer");
+  return rows.map(mapRecipientRow);
 }

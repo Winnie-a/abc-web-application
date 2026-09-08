@@ -335,10 +335,13 @@ async function pushPreApprovalToSharePoint(rec) {
   const item = await graphCreateItem("ABC Pre-Approval", fields);
   rec.spId = item.id;
 
-  // Recipient rows: RecipientID should look up the matching ABC Customer
-  // item, but recipients are still picked from the local demo/RECIPIENTS
-  // list rather than live ABC Customer data, so there's no real Customer
-  // item id to link yet — written without RecipientID until that's wired.
+  // Recipient rows: recipients are now picked from the live "FCPA Customer"
+  // SharePoint list (see graph.js/app.js), and each carries the real list
+  // item id through as r.recipientId when picked that way. Still written
+  // without a RecipientID field below, though, because the real column
+  // name on "ABC Recipient Final Expenses" itself isn't confirmed yet —
+  // add it here (e.g. RecipientID: r.recipientId) once that list's schema
+  // is confirmed via Graph Explorer, the same way FCPA Customer's was.
   for (const r of rec.recipients) {
     await graphCreateItem("ABC Recipient Final Expenses", {
       FCPANo: rec.refNo,

@@ -47,7 +47,11 @@ function isHigherManagement(requestor) {
 }
 
 /* Recipient directory — company + name + position, as seen in the recipient
-   drop-down and the 6-month record. */
+   drop-down and the 6-month record. This is now only a FALLBACK: the app
+   pulls the real recipient list live from the "FCPA Customer" SharePoint
+   list on sign-in (see graphGetRecipientDirectory() in graph.js and
+   App.recipientDirectory() in app.js) and only falls back to this static
+   array if that fetch comes back empty. */
 const RECIPIENTS = [
   { company: "Penang", name: "Chow Bong Beng", position: "Guest" },
   { company: "Denver", name: "Chee KeXin", position: "Guest" },
