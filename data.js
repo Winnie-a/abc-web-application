@@ -17,7 +17,8 @@ const CURRENT_USER = {
   position: "System Support Engineer",
   email: "winnieang@rgbgames.com",
   team: "SSM",
-  higherManagement: false
+  higherManagement: false,
+  country: "MY" // Entra ID "Country" profile field — used to tag demo/seed ABC ref numbers (see genRefNo() in store.js); real sign-in reads this live from Graph instead.
 };
 
 const EMPLOYEES = [

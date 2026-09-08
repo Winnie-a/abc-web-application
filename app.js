@@ -440,17 +440,50 @@ const App = {
   },
 
   openAddRecipientModal(forRegister) {
+    // Enforced here too, not just by hiding the link (Tab B / claim
+    // register) — so this can't be reached by anyone whose signed-in email
+    // isn't on RECIPIENT_OVERRIDE_ALLOWLIST (data.js), even by calling this
+    // directly.
+    if (!this.canAddAdHocRecipient()) { this.toast("Adding a recipient not in the directory is restricted to specific personnel."); return; }
     this.state.modal = { type: "addRecipient", forRegister: !!forRegister, form: { name: "", position: "", company: "", relationship: "", isOfficial: "No" } };
     this.render();
   },
-  submitAddRecipientModal() {
+  async submitAddRecipientModal() {
     const f = this.state.modal.form;
     if (!f.name || !f.company) { this.toast("Please enter at least the recipient's name and company."); return; }
     if (this.state.modal.forRegister) {
+      // Claim register history rows have a different, narrower shape (no
+      // position/relationship) and belong to this one claim's record, not
+      // the shared recipient master — stays local-only, as before.
       Store.addRegisterRecipient(this.state.detail.id, { date: todayISO(), name: f.name, company: f.company, others: 0, isOfficial: f.isOfficial || "No" });
-    } else {
-      this.state.wizard.recipients.push({ ...f });
+      this.state.modal = null;
+      this.render();
+      return;
     }
+    // Tab B (Recipient(s) Info): push the new recipient into the real FCPA
+    // Customer SharePoint list so it becomes a normal, searchable directory
+    // entry for everyone from now on — not just a one-off local addition to
+    // this one request.
+    this.state.modal.busy = true;
+    this.render();
+    let recipient = { name: f.name, position: f.position, company: f.company, relationship: f.relationship, isOfficial: f.isOfficial || "No", recipientId: null };
+    try {
+      const created = await graphCreateRecipient(f);
+      recipient = { name: created.name, position: created.position, company: created.company, relationship: created.relationship, isOfficial: created.isOfficial, recipientId: created.id };
+      // Only append to the live in-memory directory if it's already
+      // populated from a real sign-in fetch — an empty state.recipients
+      // means that fetch failed and recipientDirectory() is intentionally
+      // falling back to the static RECIPIENTS list (see recipientDirectory()
+      // below); pushing one item there would hide that whole fallback list
+      // for the rest of the session. The next sign-in will pick this up
+      // from SharePoint regardless.
+      if (this.state.recipients.length) this.state.recipients.push(created);
+      this.toast("Recipient added to the FCPA Customer list.");
+    } catch (e) {
+      console.error("Failed to add recipient to FCPA Customer:", e);
+      this.toast("Added to this request, but couldn't save it to the shared recipient list — add it there manually later.");
+    }
+    this.state.wizard.recipients.push(recipient);
     this.state.modal = null;
     this.render();
   },
@@ -627,6 +660,10 @@ const App = {
     w.departmentHead = dh;
     const payload = {
       submittedBy: this.state.session.employee.name,
+      // Tags the ABC reference number with the SUBMITTER's own country (not
+      // the requestor's) — matches the original Power Apps build's formula.
+      // See genRefNo() in store.js.
+      submitterCountry: this.state.session.employee.country || "",
       requestor: w.requestor, recipients: w.recipients, transactionTypes: w.transactionTypes,
       description: w.description, currency: w.currency, amounts: w.amounts,
       paymentTo: w.paymentTo, remarks: w.remarks, departmentHead: w.departmentHead
@@ -1025,7 +1062,7 @@ const App = {
           </div>
         </div>
         <div class="section-title">Total (USD) : ${fmtMoney(totalUSD)}
-          ${editable ? `<a onclick="App.openAddRecipientModal(true)">Can't find the recipient in the dropdown list? Click here</a>` : ""}
+          ${editable && this.canAddAdHocRecipient() ? `<a onclick="App.openAddRecipientModal(true)">Can't find the recipient in the dropdown list? Click here</a>` : ""}
         </div>
         <div class="table-wrap"><table class="data">
           <thead><tr><th>No</th><th>Date</th><th>Name of Recipient</th><th>Recipient's Company</th><th>Others</th><th>Is Official</th>${editable ? "<th></th>" : ""}</tr></thead>
@@ -1255,8 +1292,8 @@ const App = {
           </select>
         </div>
         <div class="modal-actions">
-          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.submitAddRecipientModal()">Add</button>
+          <button class="btn btn-secondary" ${m.busy ? "disabled" : ""} onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" ${m.busy ? "disabled" : ""} onclick="App.submitAddRecipientModal()">${m.busy ? "Saving&hellip;" : "Add"}</button>
         </div>
       </div>
     </div>`;
