@@ -31,6 +31,25 @@ const EMPLOYEES = [
   { employeeNo: "RGB-0500", name: "Ong Siew Foong", department: "MARKETING - MANAGEMENT", position: "VP, Marketing", email: "ong.foong@rgbgames.com", team: null, higherManagement: true }
 ];
 
+/* People allowed to use "Can't find the recipient? Click here" on Tab B
+   (Recipient(s) Info) to add an ad hoc recipient that isn't in the live
+   FCPA Customer directory. Everyone else must pick an existing recipient
+   from the drop-down only, so the recipient master data (and its
+   Relationship with RGB / Official flags — no longer end-user-editable,
+   see App.renderTabB) stays consistent with what compliance has on file.
+   Match on email (lowercase) since that's stable across the static
+   EMPLOYEES list and the live Graph directory. TODO(Winnie): confirm the
+   real names/emails that should be on this list — currently just a
+   placeholder. */
+const RECIPIENT_OVERRIDE_ALLOWLIST = [
+  CURRENT_USER.email
+];
+function isRecipientOverrideAllowed(employee) {
+  if (!employee || !employee.email) return false;
+  const email = employee.email.toLowerCase();
+  return RECIPIENT_OVERRIDE_ALLOWLIST.some(e => e.toLowerCase() === email);
+}
+
 function employeeByNo(employeeNo) {
   return EMPLOYEES.find(e => e.employeeNo === employeeNo) || null;
 }

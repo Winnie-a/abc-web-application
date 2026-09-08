@@ -342,31 +342,31 @@ const App = {
   },
 
   renderTabB(w) {
+    // Relationship with RGB / Official are now DISPLAY-ONLY here — they come
+    // straight from the FCPA Customer directory (or from the "Can't find the
+    // recipient?" modal for an ad hoc entry) and end users can no longer
+    // edit them on this screen, so the recipient master data stays
+    // consistent with what compliance actually has on file.
     const rows = w.recipients.map((r, i) => `
       <tr>
         <td>${i + 1}</td>
         <td>${esc(r.name)}</td>
         <td>${esc(r.position)}</td>
         <td>${esc(r.company)}</td>
-        <td>
-          <select onchange="App.setRecipientField(${i},'relationship',this.value)">
-            <option value="">Select</option>
-            ${RELATIONSHIP_OPTIONS.map(o => `<option value="${o}" ${r.relationship === o ? "selected" : ""}>${o}</option>`).join("")}
-          </select>
-        </td>
-        <td>
-          <select onchange="App.setRecipientField(${i},'isOfficial',this.value)">
-            <option value="No" ${r.isOfficial === "No" ? "selected" : ""}>No</option>
-            <option value="Yes" ${r.isOfficial === "Yes" ? "selected" : ""}>Yes</option>
-          </select>
-        </td>
+        <td>${esc(r.relationship || "-")}</td>
+        <td>${esc(r.isOfficial || "No")}</td>
         <td><button class="btn-icon" title="Remove" onclick="App.removeRecipient(${i})">&#128465;</button></td>
       </tr>`).join("");
+    // "Can't find the recipient?" (ad hoc recipient entry, bypassing the
+    // live directory) is restricted to a short hardcoded allowlist — see
+    // canAddAdHocRecipient() in data.js — so end users can't casually add
+    // untracked recipients; everyone else must pick from the directory.
+    const canAddAdHoc = this.canAddAdHocRecipient();
     return `
     <div class="card">
       <div class="section-title">
         Recipient(s) Info
-        <a onclick="App.openAddRecipientModal()">Can't find the recipient? Click here</a>
+        ${canAddAdHoc ? `<a onclick="App.openAddRecipientModal()">Can't find the recipient? Click here</a>` : ""}
       </div>
       <div class="banner warn" style="margin-bottom:16px;">
         <span>&#9888;</span>
@@ -388,6 +388,10 @@ const App = {
       </div>
     </div>`;
   },
+  canAddAdHocRecipient() {
+    const s = this.state.session;
+    return !!(s && s.employee && isRecipientOverrideAllowed(s.employee));
+  },
   recipientDirectory() {
     // Live "FCPA Customer" SharePoint list, populated on sign-in — falls
     // back to the static RECIPIENTS list in data.js only if that fetch
@@ -400,9 +404,12 @@ const App = {
     const dir = this.recipientDirectory();
     const already = new Set(this.state.wizard.recipients.map(r => r.name + "|" + r.company));
     const items = dir.filter(r => !already.has(r.name + "|" + r.company) && (r.name.toLowerCase().includes((q || "").toLowerCase()) || r.company.toLowerCase().includes((q || "").toLowerCase())));
+    const noMatchHint = this.canAddAdHocRecipient()
+      ? `No matching recipient &mdash; try "Can't find the recipient? Click here"`
+      : `No matching recipient.`;
     list.innerHTML = items.length
       ? items.map((r, i) => `<div onmousedown="App.pickRecipient(${dir.indexOf(r)})">${esc(r.company)} | ${esc(r.name)} <span class="muted small">&middot; ${esc(r.position)}</span></div>`).join("")
-      : `<div class="none">No matching recipient &mdash; try "Can't find the recipient? Click here"</div>`;
+      : `<div class="none">${noMatchHint}</div>`;
     list.style.display = "block";
   },
   pickRecipient(idx) {
@@ -427,9 +434,6 @@ const App = {
     if (s) s.value = "";
     this.render();
   },
-  setRecipientField(i, field, val) {
-    this.state.wizard.recipients[i][field] = val;
-  },
   removeRecipient(i) {
     this.state.wizard.recipients.splice(i, 1);
     this.render();
@@ -452,6 +456,13 @@ const App = {
   },
 
   renderTabC(recipients) {
+    // Stashed so the "Summary" button below works from both call sites:
+    // the active wizard (renderTabC(w.recipients)) and the read-only detail
+    // page for an already-submitted pre-approval (renderTabC(rec.recipients)
+    // in renderDetailPreApproval) — the button used to always read
+    // App.state.wizard.recipients, which is null on the detail page and made
+    // it silently do nothing there. See openSixMonthSummary() below.
+    this._tabCRecipients = recipients;
     if (!recipients.length) {
       return `<div class="card"><p class="muted">Add a recipient in Tab B to see their spending history here.</p></div>`;
     }
@@ -472,7 +483,7 @@ const App = {
     return `
     <div class="card">
       <div class="section-title">Record of Previous Six (6) Months of Recipient
-        <button class="btn btn-secondary btn-sm" onclick="App.openSixMonthSummary(App.state.wizard.recipients)">Summary</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.openSixMonthSummary()">Summary</button>
       </div>
       <div class="table-wrap">
         <table class="data">
@@ -484,8 +495,8 @@ const App = {
     </div>`;
   },
 
-  openSixMonthSummary(recipients) {
-    this.state.modal = { type: "sixMonthSummary", recipients };
+  openSixMonthSummary() {
+    this.state.modal = { type: "sixMonthSummary", recipients: this._tabCRecipients || [] };
     this.render();
   },
 
@@ -1255,7 +1266,7 @@ const App = {
     const rows = m.recipients.map(r => {
       const hist = sixMonthHistory(r);
       const totalUSD = hist.reduce((s, row) => s + toUSD(rowTotal(row), row.currency), 0);
-      const warn = totalUSD > 3000;
+      const warn = totalUSD > 1000;
       return `<tr><td>${esc(r.name)}<br><span class="muted small">${esc(r.company)}</span></td><td>${esc(r.position)}</td><td>${fmtMoney(totalUSD)}</td><td>${warn ? "&#9888;&#65039;" : ""}</td></tr>`;
     }).join("");
     return `<div class="modal-overlay" onmousedown="if(event.target===this) App.closeModal()">
