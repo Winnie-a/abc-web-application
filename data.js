@@ -169,14 +169,17 @@ function orgLineFor(team) {
 const CLAIM_TIER_MD_ABOVE_USD = 7500;    // above this, MD approval is also required
 const CLAIM_TIER_EXCO_ABOVE_USD = 25000; // above this, every EXCO member must also approve
 
+// Approval order per Winnie 2026-09-08: EXCO Members sign off from the most
+// junior seat up to the most senior (SVP first .. MD last), the reverse of
+// the roster's numbered list (MD/GCOO/COO/ED/ED/CFO/SVP).
 const EXCO_ROSTER = [
-  { name: "Dato' Seri Chuah Kim Seah", title: "MD" },
-  { name: "Datuk Steven Lim", title: "GCOO" },
-  { name: "Chuah Eng Meng", title: "COO" },
-  { name: "Chuah Hui Jing", title: "ED" },
-  { name: "Ganaser A/L Kaliappen", title: "ED" },
+  { name: "Mazlan Bin Ismail", title: "SVP" },
   { name: "Liew Yung Kuan", title: "CFO" },
-  { name: "Mazlan Bin Ismail", title: "SVP" }
+  { name: "Ganaser A/L Kaliappen", title: "ED" },
+  { name: "Chuah Hui Jing", title: "ED" },
+  { name: "Chuah Eng Meng", title: "COO" },
+  { name: "Datuk Steven Lim", title: "GCOO" },
+  { name: "Dato' Seri Chuah Kim Seah", title: "MD" }
 ];
 
 const STAGE_HOD = { title: "HOD", role: "Head of Department", resolve: "hod" };
