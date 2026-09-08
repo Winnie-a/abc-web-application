@@ -77,24 +77,34 @@ const App = {
 
   /* Whether the signed-in Microsoft account is also one of the named
      approver roles (CFO, GCOO, MD, EXCO, Compliance Committee, DH,
-     HOD/SHOD, ...) from data.js — decides whether the Approver Console nav
-     link shows up. Replaces the old, unauthenticated "Approver sign-in"
-     picker: acting on a stage now requires actually being signed in as
-     that real person, not just selecting their name from a dropdown. */
+     HOD/SHOD, ...) from data.js, OR is in ADMIN_USERS (data.js) — either way
+     decides whether the Approver Console nav link / home button shows up.
+     Replaces the old, unauthenticated "Approver sign-in" picker: acting on a
+     stage now requires actually being signed in as that real person, not
+     just selecting their name from a dropdown — an admin gets full
+     read-only oversight (see Store.allPendingApprovals()/allApprovalHistory()
+     in store.js), never the ability to act on someone else's stage, since
+     _actingStage() below does its own independent real-name check. */
   isApproverUser() {
     const s = this.state.session;
     if (!s || !s.employee) return false;
-    return allApproverIdentities().some(i => i.name === s.employee.name);
+    return allApproverIdentities().some(i => i.name === s.employee.name) || isAdminUser(s.employee);
   },
   approverIdentity() {
     const s = this.state.session;
     if (!s || !s.employee) return null;
+    const admin = isAdminUser(s.employee);
     const match = allApproverIdentities().find(i => i.name === s.employee.name);
-    return { name: s.employee.name, role: match ? match.role : (s.employee.position || "") };
+    return { name: s.employee.name, role: match ? match.role : (admin ? "Admin" : (s.employee.position || "")), isAdmin: admin };
   },
   openApproverConsole() {
     if (!this.isApproverUser()) { this.toast("Your signed-in account isn't in the approver roster."); return; }
+    this.state.approverSub = "pending";
     this.state.view = "approverHome";
+    this.render();
+  },
+  setApproverSub(sub) {
+    this.state.approverSub = sub;
     this.render();
   },
 
@@ -192,6 +202,7 @@ const App = {
       <div class="home-actions">
         <button class="home-btn" onclick="App.startNewRequest()">Create New<br>Request</button>
         <button class="home-btn" onclick="App.openSubmission()">Check My<br>Submission</button>
+        ${this.isApproverUser() ? `<button class="home-btn" onclick="App.openApproverConsole()">Approver<br>Console</button>` : ""}
       </div>
       <div class="home-sub">Gift, Meal, Travel &amp; Entertainment Pre-Approval &amp; Claims</div>
     </div>`;
@@ -1211,7 +1222,14 @@ const App = {
       return "";
     }
     const identity = this.approverIdentity();
-    const queue = Store.approverQueue(identity);
+    const sub = this.state.approverSub || "pending";
+    const isPending = sub === "pending";
+    const queue = identity.isAdmin
+      ? (isPending ? Store.allPendingApprovals() : Store.allApprovalHistory())
+      : (isPending ? Store.approverQueue(identity) : Store.approverHistory(identity));
+    // Admin sees every approver's items, so the table also needs to say who
+    // it's pending on / who decided it — a personal queue already implies
+    // "me", so that column is only shown for admin.
     const rows = queue.map(item => {
       const totalUSD = item.flow === "claim" ? claimActualUSD(item.rec.claim) : computePreApprovalTotalUSD(item.rec);
       return `<tr>
@@ -1220,23 +1238,35 @@ const App = {
         <td>${esc(item.rec.submittedBy || item.rec.requestor.name)}</td>
         <td>${item.flow === "claim" ? "Claim Form" : "Pre-Approval Form"}</td>
         <td>${esc(item.stage.title)}</td>
+        ${identity.isAdmin ? `<td>${esc(item.stage.name || "-")}</td>` : ""}
         <td>&asymp; USD ${fmtMoney(totalUSD)}</td>
-        <td>${fmtDate(item.rec.dateSubmitted)}</td>
-        <td><button class="btn btn-secondary btn-sm" onclick="App.reviewFromQueue('${item.rec.id}','${item.flow}')">Review</button></td>
+        ${isPending
+          ? `<td>${fmtDate(item.rec.dateSubmitted)}</td>`
+          : `<td><span class="pill ${stagePillClass(item.stage.status)}">${stageLabel(item.stage.status)}</span></td><td>${fmtDate(item.stage.date)}</td>`}
+        <td><button class="btn btn-secondary btn-sm" onclick="App.reviewFromQueue('${item.rec.id}','${item.flow}')">${isPending && !identity.isAdmin ? "Review" : "View"}</button></td>
       </tr>`;
     }).join("");
+    const decidedByCol = identity.isAdmin ? `<th>${isPending ? "Awaiting" : "Decided By"}</th>` : "";
+    const dateCols = isPending ? `<th>Date Submitted</th>` : `<th>Decision</th><th>Date Decided</th>`;
+    const colCount = 7 + (identity.isAdmin ? 1 : 0) + (isPending ? 1 : 2);
     return `
     <div class="page">
       <div class="page-header"><h2>Approver Console</h2></div>
       <div class="banner">
         <span>&#9989;</span>
-        <div><b>Signed in as ${esc(identity.name)}</b>${esc(identity.role)} &mdash; showing every pre-approval &amp; claim currently awaiting your decision.</div>
+        <div><b>Signed in as ${esc(identity.name)}</b>${esc(identity.role)}${identity.isAdmin
+          ? " &mdash; admin view: every pre-approval &amp; claim across the whole org, read-only (approving/rejecting still requires being the real named approver on that stage)."
+          : " &mdash; showing every pre-approval &amp; claim currently awaiting your decision."}</div>
+      </div>
+      <div class="subtabs tabs">
+        <a class="tab ${isPending ? "active" : ""}" onclick="App.setApproverSub('pending')">${identity.isAdmin ? "All Pending" : "Awaiting Your Approval"}</a>
+        <a class="tab ${!isPending ? "active" : ""}" onclick="App.setApproverSub('approved')">${identity.isAdmin ? "All Approved / Rejected" : "Approved / Rejected By You"}</a>
       </div>
       <div class="card" style="padding:0;">
         <div class="table-wrap">
           <table class="data">
-            <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Submitted By</th><th>Flow</th><th>Stage</th><th>Amount</th><th>Date Submitted</th><th>Action</th></tr></thead>
-            <tbody>${rows || `<tr class="empty-row"><td colspan="8">Nothing awaiting your approval right now.</td></tr>`}</tbody>
+            <thead><tr><th>ABC Reference No</th><th>Name of Requestor</th><th>Submitted By</th><th>Flow</th><th>Stage</th>${decidedByCol}<th>Amount</th>${dateCols}<th>Action</th></tr></thead>
+            <tbody>${rows || `<tr class="empty-row"><td colspan="${colCount}">${isPending ? "Nothing awaiting approval right now." : "No approval decisions yet."}</td></tr>`}</tbody>
           </table>
         </div>
       </div>

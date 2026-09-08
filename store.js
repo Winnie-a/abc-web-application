@@ -533,5 +533,68 @@ const Store = {
       }
     });
     return items;
+  },
+
+  /* Every stage across every record currently pending on ANYONE — the admin
+     oversight equivalent of approverQueue(), used when the signed-in user is
+     in ADMIN_USERS (data.js) rather than filtered to a single approver's own
+     name. Read-only: seeing an item here never grants the ability to act on
+     it — App._actingStage() in app.js still requires the real named approver
+     to be signed in before the Approve/Reject panel appears. */
+  allPendingApprovals() {
+    const items = [];
+    this.state.preApprovals.forEach(rec => {
+      if (rec.status === "Pending") {
+        rec.approvals.forEach((s, idx) => {
+          if (s.status === "pending") items.push({ flow: "preapproval", rec, stageIndex: idx, stage: s });
+        });
+      }
+      if (rec.claim && rec.claim.status === "Open" && rec.claim.approvals && rec.claim.approvals.length) {
+        rec.claim.approvals.forEach((s, idx) => {
+          if (s.status === "pending") items.push({ flow: "claim", rec, stageIndex: idx, stage: s });
+        });
+      }
+    });
+    return items;
+  },
+
+  /* Stages a given approver identity has already decided (approved or
+     rejected) — their personal "passed" history, most recent decision first. */
+  approverHistory(identity) {
+    const items = [];
+    this.state.preApprovals.forEach(rec => {
+      rec.approvals.forEach((s, idx) => {
+        if ((s.status === "approved" || s.status === "rejected") && s.name === identity.name) {
+          items.push({ flow: "preapproval", rec, stageIndex: idx, stage: s });
+        }
+      });
+      if (rec.claim && rec.claim.approvals) {
+        rec.claim.approvals.forEach((s, idx) => {
+          if ((s.status === "approved" || s.status === "rejected") && s.name === identity.name) {
+            items.push({ flow: "claim", rec, stageIndex: idx, stage: s });
+          }
+        });
+      }
+    });
+    items.sort((a, b) => (a.stage.date < b.stage.date ? 1 : -1));
+    return items;
+  },
+
+  /* Every already-decided stage across every record and every approver — the
+     admin oversight equivalent of approverHistory(). */
+  allApprovalHistory() {
+    const items = [];
+    this.state.preApprovals.forEach(rec => {
+      rec.approvals.forEach((s, idx) => {
+        if (s.status === "approved" || s.status === "rejected") items.push({ flow: "preapproval", rec, stageIndex: idx, stage: s });
+      });
+      if (rec.claim && rec.claim.approvals) {
+        rec.claim.approvals.forEach((s, idx) => {
+          if (s.status === "approved" || s.status === "rejected") items.push({ flow: "claim", rec, stageIndex: idx, stage: s });
+        });
+      }
+    });
+    items.sort((a, b) => (a.stage.date < b.stage.date ? 1 : -1));
+    return items;
   }
 };

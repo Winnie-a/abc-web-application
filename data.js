@@ -51,6 +51,25 @@ function isRecipientOverrideAllowed(employee) {
   return RECIPIENT_OVERRIDE_ALLOWLIST.some(e => e.toLowerCase() === email);
 }
 
+/* Admin allowlist — added 2026-09-08 at Winnie's request. Anyone here gets
+   full oversight access to the Approver Console (App.isApproverUser() in
+   app.js) even though they aren't a named DH/HOD/SHOD/CFO/GCOO/MD/Compliance/
+   EXCO approver: an "All Pending" queue across every stage/approver (not
+   just their own) and an "All Approved/Rejected" history across the whole
+   org (Store.allPendingApprovals()/allApprovalHistory() in store.js), both
+   read-only — the actual Approve/Reject panel only ever appears for the
+   real named person on a pending stage (App._actingStage() in app.js does
+   its own independent real-name check, so being on this list alone can
+   never grant approve/reject rights on someone else's stage). */
+const ADMIN_USERS = [
+  CURRENT_USER.email
+];
+function isAdminUser(employee) {
+  if (!employee || !employee.email) return false;
+  const email = employee.email.toLowerCase();
+  return ADMIN_USERS.some(e => e.toLowerCase() === email);
+}
+
 function employeeByNo(employeeNo) {
   return EMPLOYEES.find(e => e.employeeNo === employeeNo) || null;
 }
