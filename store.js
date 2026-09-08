@@ -9,8 +9,16 @@ const STORAGE_KEY = "abc_app_state_v2";
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
-function genRefNo() {
-  return "ABC-MY-" + uid();
+function genRefNo(country) {
+  // Matches the original Power Apps build's formula:
+  //   "ABC-" & Office365Users.MyProfile().Country & "-" & Left(GUID(), 8)
+  // i.e. the reference number is tagged with the SUBMITTER's own Entra ID
+  // "Country" profile field (whoever is signed in and clicks Submit) — not
+  // the requestor being submitted for, and not the recipient's country.
+  // Falls back to "MY" if the signed-in profile has no Country set, so we
+  // never emit a double-dash "ABC--xxxxx" ref no.
+  const tag = (country || "").toString().trim() || "MY";
+  return "ABC-" + tag + "-" + uid();
 }
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
@@ -133,7 +141,7 @@ function computePreApprovalTotalUSD(rec) {
 function newBlankPreApproval() {
   return {
     id: uid(),
-    refNo: genRefNo(),
+    refNo: genRefNo(CURRENT_USER.country),
     submittedBy: CURRENT_USER.name,
     requestor: { name: CURRENT_USER.name, employeeNo: CURRENT_USER.employeeNo, department: CURRENT_USER.department, position: CURRENT_USER.position },
     recipients: [],
@@ -186,8 +194,8 @@ function buildSeedPreApproval({ requestor, recipients, currency, amounts, dh, da
 
 function newBlankClaim(preApproval, prefill) {
   const claim = {
-    company: prefill ? "RGB" : "",
-    costBearBy: prefill ? "RGB" : "",
+    company: prefill ? "RGB Sdn Bhd" : "",
+    costBearBy: prefill ? "RGB Sdn Bhd" : "",
     date: prefill ? preApproval.dateSubmitted : "",
     conversionRate: prefill ? 4.2 : "",
     purposeOfClaim: prefill ? preApproval.description : "",
@@ -254,7 +262,7 @@ function seedState() {
 
   const closedHistory1 = buildSeedPreApproval({
     requestor: { name: otherEmp.name, employeeNo: otherEmp.employeeNo, department: otherEmp.department, position: otherEmp.position },
-    recipients: [{ name: "Ms Gladys Lei", company: "IGT", position: "Regional Manager", relationship: "Partner", isOfficial: "No" }],
+    recipients: [{ name: "Ms Gladys Lei", company: "IGT", position: "Regional Manager", relationship: "Business Partner / JV Partner", isOfficial: "No" }],
     currency: "USD",
     amounts: { gifts: 150, meals: 0, entertainment: 0, airfare: 0, transportation: 0, hotel: 0, othersLabel: "", othersAmount: 0 },
     dh: dh2, daysAgo: 85, forceStatus: "closed", withClaim: true, claimClosed: true
@@ -399,7 +407,7 @@ const Store = {
   },
 
   async createPreApproval(draft) {
-    const rec = { ...draft, id: uid(), refNo: genRefNo(), dateSubmitted: todayISO(), status: "Pending", claim: null };
+    const rec = { ...draft, id: uid(), refNo: genRefNo(draft.submitterCountry), dateSubmitted: todayISO(), status: "Pending", claim: null };
     rec.approvals = buildChain(preApprovalChainDef(isHigherManagement(rec.requestor)), chainResolveMap(rec.requestor, rec.departmentHead));
     this.state.preApprovals.unshift(rec);
     this.save();

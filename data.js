@@ -98,9 +98,19 @@ const RECIPIENTS = [
   { company: "StarDream Cruises", name: "Chuah CK", position: "Executive" }
 ];
 
-const RELATIONSHIP_OPTIONS = ["Customer", "Supplier", "Partner", "Government Official", "Other"];
+// Matches the "Relationship" category rows in the live "ABC Data" SharePoint
+// list (rgbgames.sharepoint.com/sites/playground/Lists/ABC Data) — was
+// previously a different, made-up set (Customer/Supplier/Partner/Government
+// Official/Other) that didn't match what's actually in the source list, so
+// any real recipient record using these values would get silently blanked
+// out by the RELATIONSHIP_OPTIONS.includes() check in app.js. Verified 2026-09-08.
+const RELATIONSHIP_OPTIONS = ["Supplier / Manufacturer", "Customer", "Gaming Authorities", "Business Partner / JV Partner"];
 
-const COMPANIES = ["RGB", "PalmGold Corporate Services Sdn Bhd (PG2)", "IGT", "Light & Wonder"];
+// Matches the "Company" category rows in the live "ABC Data" SharePoint list
+// (rgbgames.sharepoint.com/sites/playground/Lists/ABC Data) — was previously a
+// stale/wrong placeholder list (PalmGold/IGT/Light & Wonder never appeared
+// there at all). Verified 2026-09-08.
+const COMPANIES = ["RGB Sdn Bhd", "RGB Ltd", "RGB Macau", "RGB International", "Data Touch Sdn Bhd", "Retro Solution Sdn Bhd", "RGB Digital Sdn Bhd", "Dreamgate holding Co Ltd"];
 
 /* Phase 2: expanded currency support (previously MYR, USD, VND, PHP, THB, EUR). */
 const CURRENCIES = ["USD", "MYR", "VND", "PHP", "THB", "EUR", "SGD", "GBP", "MOP", "AUD", "HKD", "KRW", "LKR"];
