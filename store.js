@@ -657,13 +657,13 @@ async function listRecipientExpenseRows(preId) {
     const siteId = await getSiteId();
     const filter = encodeURIComponent(`fields/ABCNoLookupId eq ${preId}`);
     const data = await graphFetch(
-      `/sites/${siteId}/lists/${resolveListRef(RECIPIENT_EXPENSE_LIST)}/items?$filter=${filter}&$expand=fields($select=Title,ABCNoLookupId,RecipientIDLookupId)`,
+      `/sites/${siteId}/lists/${resolveListRef(RECIPIENT_EXPENSE_LIST)}/items?$filter=${filter}&$expand=fields($select=Title,ABCNoLookupId,RecipientIDLookupId,ClaimRegisterDate)`,
       { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
     );
     return (data.value || []).map(i => ({ id: i.id, ...i.fields }));
   } catch (e) {
     // server-side filter refused -> read the (small) list and filter here
-    const all = await graphListAllItems(RECIPIENT_EXPENSE_LIST, ["Title", "ABCNoLookupId", "RecipientIDLookupId"]);
+    const all = await graphListAllItems(RECIPIENT_EXPENSE_LIST, ["Title", "ABCNoLookupId", "RecipientIDLookupId", "ClaimRegisterDate"]);
     return all.filter(r => Number(r.ABCNoLookupId) === Number(preId));
   }
 }
@@ -698,6 +698,56 @@ async function saveRecipientExpenses(rec) {
       const rid = recipientIdFor(rec, p);
       await graphCreateItem(RECIPIENT_EXPENSE_LIST, { Title: p.name || "", ABCNoLookupId: preId, ...(rid ? { RecipientIDLookupId: rid } : {}), ...fields });
     }
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Claim line items -> the ABC Invoice list (one row per line), so an approver
+   on another computer can see what is being claimed. "ABCClaimID" is a lookup
+   into ABC Claim Form (the older "FCPAClaimID" lookup on this list points at
+   the FCPA Claim Form, so it is not written). Same columns as FCPA Invoice.
+   -------------------------------------------------------------------------- */
+const INVOICE_LIST = "ABC Invoice";
+
+async function listInvoiceRows(claimRowId) {
+  try {
+    const siteId = await getSiteId();
+    const filter = encodeURIComponent(`fields/ABCClaimIDLookupId eq ${claimRowId}`);
+    const data = await graphFetch(
+      `/sites/${siteId}/lists/${resolveListRef(INVOICE_LIST)}/items?$filter=${filter}&$expand=fields&$top=200`,
+      { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+    );
+    return (data.value || []).map(i => ({ id: i.id, ...i.fields }));
+  } catch (e) {
+    const all = await graphListAllItems(INVOICE_LIST);
+    return all.filter(r => Number(r.ABCClaimIDLookupId) === Number(claimRowId));
+  }
+}
+
+// Saves the claim's line items. Skipped when the claim already has rows in the
+// list (so a retry can't duplicate them).
+async function saveClaimInvoices(rec) {
+  const claim = rec.claim;
+  if (!claim || !(claim.lineItems || []).length) return;
+  const claimRowId = Number(await findClaimRowId(rec));
+  if (!(claimRowId > 0)) return;
+  if ((await listInvoiceRows(claimRowId)).length) return;
+  const cur = claimCurrency(claim);
+  for (const li of claim.lineItems) {
+    const fields = {
+      Title: rec.refNo,
+      ABCClaimIDLookupId: claimRowId,
+      Description: li.description || "",
+      HasReceipt: li.hasReceipt || "",
+      Amount: lineAmount(li),
+      Purpose: li.purpose || "",
+      Other: li.attachment || "",
+      TransactionType: li.transactionType || "",
+      PaymentMethod: li.paymentMethod || "",
+      ConversionRate: String(lineRate(li, claim))
+    };
+    if (li.date) fields.InvoiceDate = li.date;
+    await graphCreateItem(INVOICE_LIST, fields);
   }
 }
 
@@ -745,6 +795,66 @@ async function buildPreApprovalFromRow(item) {
   };
 }
 
+// Rebuilds the submitted claim (header, approval stages, line items, recipient
+// register) from the ABC Claim Form row + its ABC Invoice and ABC Recipient
+// Final Expenses rows. Returns null when the claim hasn't been submitted yet
+// (a claim row that is still just "Open" has nothing to review).
+async function buildClaimFromRow(rec, item, recipientRows) {
+  const f = item.fields || {};
+  if (!f.SubmissionDate) return null;
+  const hm = !!(rec.requestor && rec.requestor.higherManagement);
+  const full = claimChainDef(hm, 1e12).map(def => ({ title: def.title }));
+  const approvals = [];
+  claimChainDef(hm, 1e12).forEach((def, i) => {
+    const c = claimStageColumns(full, i);
+    if (!f[c.name]) return; // this claim's amount didn't need that stage
+    approvals.push({
+      title: def.title, role: def.role, name: f[c.name], applicable: true,
+      email: f[c.email] || "", position: f[c.position] || def.role,
+      status: SP_STATUS_TO_STAGE[f[c.status]] || "waiting",
+      date: f[c.date] ? localISODate(new Date(f[c.date])) : null,
+      comments: f[c.comments] || "", rejectReason: f[c.reject] || ""
+    });
+  });
+  const lines = (await listInvoiceRows(Number(item.id))).map(r => ({
+    id: "sp-" + r.id, date: r.InvoiceDate ? localISODate(new Date(r.InvoiceDate)) : "",
+    description: r.Description || "", hasReceipt: r.HasReceipt || "", transactionType: r.TransactionType || "",
+    paymentMethod: r.PaymentMethod || "", amount: Number(r.Amount) || 0, rate: Number(String(r.ConversionRate || "").trim()) || 0,
+    purpose: r.Purpose || "", attachment: r.Other || ""
+  }));
+  const dir = (typeof App !== "undefined" && App.state && App.state.recipients) || [];
+  return {
+    spId: item.id, company: f.Company || "", costBearBy: f.CostBearCompany || "",
+    date: f.SubmissionDate ? localISODate(new Date(f.SubmissionDate)) : "",
+    conversionRate: f.ConversionRate || "", currency: rec.currency || "",
+    purposeOfClaim: f.Purposeofclaim || "", lineItems: lines, attachments: [],
+    register: {
+      month: f.Month || "", year: f.Year || null,
+      recipients: (recipientRows || []).map(r => {
+        const d = dir.find(x => String(x.id) === String(r.RecipientIDLookupId)) || {};
+        return { date: r.ClaimRegisterDate ? localISODate(new Date(r.ClaimRegisterDate)) : "", name: r.Title || d.name || "", company: d.company || "", others: 0, isOfficial: d.isOfficial || "No" };
+      })
+    },
+    approvals,
+    status: { Closed: "Closed", Rejected: "Rejected", Cancelled: "Cancelled" }[f.Gate1] || "Open",
+    submittedDate: f.SubmissionDate ? localISODate(new Date(f.SubmissionDate)) : null
+  };
+}
+
+async function attachClaimFromSharePoint(rec) {
+  const siteId = await getSiteId();
+  const filter = encodeURIComponent(`fields/Title eq '${String(rec.refNo).replace(/'/g, "''")}'`);
+  const data = await graphFetch(
+    `/sites/${siteId}/lists/${resolveListRef("ABC Claim Form")}/items?$filter=${filter}&$expand=fields`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+  );
+  const item = data.value && data.value[0];
+  if (!item) return;
+  rec.claimSpId = item.id;
+  const rows = await listRecipientExpenseRows(Number(rec.spId));
+  rec.claim = await buildClaimFromRow(rec, item, rows);
+}
+
 // Brings one request in from SharePoint (by ABC reference number) and returns it,
 // or null if there is no such row. A copy already in this browser keeps its own
 // data; only its stage statuses / overall status are refreshed from SharePoint.
@@ -757,15 +867,38 @@ async function importPreApprovalByRef(refNo) {
   );
   const item = data.value && data.value[0];
   if (!item) return null;
-  return mergeImportedPreApproval(await buildPreApprovalFromRow(item));
+  const fresh = await buildPreApprovalFromRow(item);
+  await attachClaimFromSharePoint(fresh);
+  return mergeImportedPreApproval(fresh);
 }
 
 function mergeImportedPreApproval(fresh) {
   const mine = Store.getByRef(fresh.refNo);
   if (!mine) { Store.state.preApprovals.unshift(fresh); Store.save(); return fresh; }
   mine.approvals = fresh.approvals; mine.status = fresh.status; mine.spId = mine.spId || fresh.spId;
+  if (fresh.claimSpId) mine.claimSpId = fresh.claimSpId;
+  if (fresh.claim) {
+    if (!mine.claim) mine.claim = fresh.claim;
+    else {
+      mine.claim.approvals = fresh.claim.approvals; mine.claim.status = fresh.claim.status; mine.claim.spId = fresh.claim.spId;
+      if (!(mine.claim.lineItems || []).length) mine.claim.lineItems = fresh.claim.lineItems;
+    }
+  }
   Store.save();
   return mine;
+}
+
+// Imports every claim that is still Pending in SharePoint (with its request).
+async function importPendingClaims() {
+  const siteId = await getSiteId();
+  const filter = encodeURIComponent("fields/Gate1 eq 'Pending'");
+  const data = await graphFetch(
+    `/sites/${siteId}/lists/${resolveListRef("ABC Claim Form")}/items?$filter=${filter}&$expand=fields($select=Title)&$top=100`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+  );
+  let n = 0;
+  for (const item of (data.value || [])) { if (item.fields && item.fields.Title && await importPreApprovalByRef(item.fields.Title)) n++; }
+  return n;
 }
 
 // Imports every Pre-Approval that is still Pending in SharePoint — what the
@@ -941,7 +1074,7 @@ const Store = {
     if (!stage || !stage.email) return;
     const form = this._formName(which);
     Notify.send({
-      toEmail: stage.email, rec,
+      toEmail: stage.email, rec, which,
       subject: `${form} ${rec.refNo} is waiting for your approval (${stage.title})`,
       intro: `Hi ${Notify.esc(stage.name)}, a ${form} is waiting for your approval as ${Notify.esc(stage.title)}.`,
       lines: this._factLines(rec)
@@ -955,7 +1088,7 @@ const Store = {
     const form = this._formName(which);
     const rejected = action === "reject";
     Notify.send({
-      toEmail: to, rec,
+      toEmail: to, rec, which,
       subject: rejected ? `${form} ${rec.refNo} was rejected (${stage.title})` : `${form} ${rec.refNo} is fully approved`,
       intro: rejected
         ? `Your ${form} was rejected by ${Notify.esc(stage.name)} (${Notify.esc(stage.title)}).`
@@ -1071,6 +1204,7 @@ const Store = {
     this.syncDecision(rec, async () => {
       await pushClaimToSharePoint(rec);
       await saveRecipientExpenses(rec); // each recipient's equal USD share of the claim
+      await saveClaimInvoices(rec);     // the claim's line items, for approvers on other computers
       this.save();
     });
     this.notifyWaiting(rec, "claim");

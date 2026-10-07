@@ -125,7 +125,7 @@ const App = {
     // Also pull in everything still Pending in SharePoint, so requests submitted
     // on other computers show up here; the list refreshes when it arrives.
     if (typeof isGraphConnected === "function" && isGraphConnected()) {
-      importPendingPreApprovals().then(() => { if (this.state.view === "approverHome") this.render(); })
+      importPendingPreApprovals().then(() => importPendingClaims()).then(() => { if (this.state.view === "approverHome") this.render(); })
         .catch(e => console.error("Loading pending requests from SharePoint failed", e));
     }
   },
@@ -133,14 +133,17 @@ const App = {
   // A link like ...?ref=ABC-MY-xxxx (from an email / Teams message) opens that
   // request, loaded from SharePoint when it was submitted on another computer.
   async openFromLink() {
-    const ref = new URLSearchParams(window.location.search).get("ref");
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get("ref");
     if (!ref) return;
+    const formParam = params.get("form"); // "claim" -> open the claim form, not the Pre-Approval
     try {
       const rec = await importPreApprovalByRef(ref);
       window.history.replaceState({}, "", window.location.pathname); // so a refresh doesn't repeat it
       if (!rec) { this.toast("Couldn't find request " + ref + " in SharePoint."); return; }
-      if (this.isApproverUser()) this.reviewFromQueue(rec.id, "preapproval");
-      else this.openDetail(rec.id, "preapproval");
+      const form = formParam === "claim" && rec.claim ? "claim" : "preapproval";
+      if (this.isApproverUser()) this.reviewFromQueue(rec.id, form);
+      else this.openDetail(rec.id, form);
     } catch (e) {
       console.error("Opening request from link failed", e);
       this.toast("Couldn't open " + ref + ": " + ((e && e.message) || e).toString().slice(0, 120));

@@ -77,8 +77,9 @@ const Notify = {
     return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   },
 
-  link(rec) {
-    return `${window.location.origin}${window.location.pathname}?ref=${encodeURIComponent(rec.refNo)}`;
+  // which = "claim" opens the claim form of that request instead of the Pre-Approval.
+  link(rec, which) {
+    return `${window.location.origin}${window.location.pathname}?ref=${encodeURIComponent(rec.refNo)}${which === "claim" ? "&form=claim" : ""}`;
   },
 
   _userByEmail(email) {
@@ -89,7 +90,7 @@ const Notify = {
 
   /* Sends one notification by email AND Teams. `lines` = short facts shown in
      the message body. Never throws: resolves { mail, teams } booleans. */
-  async send({ toEmail, subject, intro, lines, rec }) {
+  async send({ toEmail, subject, intro, lines, rec, which }) {
     const out = { mail: false, teams: false };
     try {
       if (!this.enabled || typeof isGraphConnected !== "function" || !isGraphConnected()) return out;
@@ -98,7 +99,7 @@ const Notify = {
       const redirect = (typeof localStorage !== "undefined" && localStorage.getItem("abc_notify_redirect")) || "";
       if (redirect) { tag = `[TEST — intended for ${to || "nobody"}] `; to = redirect.trim(); }
       if (!to) return out;
-      const html = `<p>${intro}</p><p>${(lines || []).map(l => l).join("<br>")}</p><p><a href="${this.link(rec)}">Open ${rec.refNo} in the ABC app</a></p>`
+      const html = `<p>${intro}</p><p>${(lines || []).map(l => l).join("<br>")}</p><p><a href="${this.link(rec, which)}">Open ${rec.refNo} in the ABC app</a></p>`
         + (tag ? `<p><i>${tag}</i></p>` : "");
       const me = App.state.session && App.state.session.employee;
       const target = this._userByEmail(to);
