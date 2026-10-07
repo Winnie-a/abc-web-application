@@ -122,6 +122,29 @@ const App = {
     this.state.approverSub = "pending";
     this.state.view = "approverHome";
     this.render();
+    // Also pull in everything still Pending in SharePoint, so requests submitted
+    // on other computers show up here; the list refreshes when it arrives.
+    if (typeof isGraphConnected === "function" && isGraphConnected()) {
+      importPendingPreApprovals().then(() => { if (this.state.view === "approverHome") this.render(); })
+        .catch(e => console.error("Loading pending requests from SharePoint failed", e));
+    }
+  },
+
+  // A link like ...?ref=ABC-MY-xxxx (from an email / Teams message) opens that
+  // request, loaded from SharePoint when it was submitted on another computer.
+  async openFromLink() {
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (!ref) return;
+    try {
+      const rec = await importPreApprovalByRef(ref);
+      window.history.replaceState({}, "", window.location.pathname); // so a refresh doesn't repeat it
+      if (!rec) { this.toast("Couldn't find request " + ref + " in SharePoint."); return; }
+      if (this.isApproverUser()) this.reviewFromQueue(rec.id, "preapproval");
+      else this.openDetail(rec.id, "preapproval");
+    } catch (e) {
+      console.error("Opening request from link failed", e);
+      this.toast("Couldn't open " + ref + ": " + ((e && e.message) || e).toString().slice(0, 120));
+    }
   },
   setApproverSub(sub) {
     this.state.approverSub = sub;
@@ -162,7 +185,9 @@ const App = {
       this.state.recipients = recipients;
       this.state.session = { employee: me };
       this.state.appStatus = appStatus;
+      await Notify.checkEnabled(); // quiet check: were the email / Teams permissions already granted?
       this.state.view = this.isMaintenance() ? "maintenance" : "home";
+      if (this.state.view === "home") await this.openFromLink();
     } catch (e) {
       this.toast("Sign-in failed: " + (e.message || e));
     } finally {
@@ -290,7 +315,21 @@ const App = {
         ${this.isApproverUser() ? `<button class="home-btn" onclick="App.openApproverConsole()">Approver<br>Console</button>` : ""}
       </div>
       <div class="home-sub">Gift, Meal, Travel &amp; Entertainment Pre-Approval &amp; Claims</div>
+      ${Notify.enabled ? "" : `<div class="banner" style="margin:24px auto 0;max-width:560px;"><span>&#128276;</span><div><b>Email &amp; Teams notifications are off</b>Approvers are told by email and Teams when it is their turn. Enable it once (Microsoft will ask you to allow it).
+        <div style="margin-top:8px;"><button class="btn btn-secondary btn-sm" onclick="App.enableNotifications()">Enable notifications</button></div></div></div>`}
     </div>`;
+  },
+
+  // Opens Microsoft's consent pop-up for sending mail / Teams messages as you.
+  async enableNotifications() {
+    try {
+      await Notify.enable();
+      this.toast("Notifications enabled.");
+    } catch (e) {
+      console.error("Enable notifications failed", e);
+      this.toast("Notifications were not enabled: " + ((e && e.message) || e).toString().slice(0, 140));
+    }
+    this.render();
   },
 
   /* ======================= NEW REQUEST WIZARD ======================= */
@@ -767,6 +806,7 @@ const App = {
     w.departmentHead = dh;
     const payload = {
       submittedBy: this.state.session.employee.name,
+      submitterEmail: this.state.session.employee.email || "", // who is told when it is rejected / fully approved
       // Tags the ABC reference number with the SUBMITTER's own country (not
       // the requestor's) — matches the original Power Apps build's formula.
       // See genRefNo() in store.js.

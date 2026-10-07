@@ -646,13 +646,13 @@ async function listRecipientExpenseRows(preId) {
     const siteId = await getSiteId();
     const filter = encodeURIComponent(`fields/ABCNoLookupId eq ${preId}`);
     const data = await graphFetch(
-      `/sites/${siteId}/lists/${resolveListRef(RECIPIENT_EXPENSE_LIST)}/items?$filter=${filter}&$expand=fields($select=Title,ABCNoLookupId)`,
+      `/sites/${siteId}/lists/${resolveListRef(RECIPIENT_EXPENSE_LIST)}/items?$filter=${filter}&$expand=fields($select=Title,ABCNoLookupId,RecipientIDLookupId)`,
       { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
     );
     return (data.value || []).map(i => ({ id: i.id, ...i.fields }));
   } catch (e) {
     // server-side filter refused -> read the (small) list and filter here
-    const all = await graphListAllItems(RECIPIENT_EXPENSE_LIST, ["Title", "ABCNoLookupId"]);
+    const all = await graphListAllItems(RECIPIENT_EXPENSE_LIST, ["Title", "ABCNoLookupId", "RecipientIDLookupId"]);
     return all.filter(r => Number(r.ABCNoLookupId) === Number(preId));
   }
 }
@@ -688,6 +688,87 @@ async function saveRecipientExpenses(rec) {
       await graphCreateItem(RECIPIENT_EXPENSE_LIST, { Title: p.name || "", ABCNoLookupId: preId, ...(rid ? { RecipientIDLookupId: rid } : {}), ...fields });
     }
   }
+}
+
+/* --------------------------------------------------------------------------
+   Loading a Pre-Approval FROM SharePoint — so an approver on another computer
+   (following the link in an email / Teams message, or opening the Approver
+   Console) sees the request even though it was submitted in someone else's
+   browser. Rebuilds the same record shape the app uses from the
+   ABC Pre-Approval row + its ABC Recipient Final Expenses rows. Claims are not
+   loaded yet (their line items are not saved to SharePoint).
+   -------------------------------------------------------------------------- */
+const SP_STATUS_TO_STAGE = { Pending: "pending", Approved: "approved", Rejected: "rejected" };
+const SP_GATE0_TO_STATUS = { Pending: "Pending", Closed: "Approved", Rejected: "Rejected", Cancelled: "Cancelled" };
+
+async function buildPreApprovalFromRow(item) {
+  const f = item.fields || {};
+  const hm = !f.Gate0DH; // Higher Management requests have no DH stage
+  const approvals = preApprovalChainDef(hm).map(def => {
+    const key = "Gate0" + gateColumnKey(def.title);
+    return {
+      title: def.title, role: def.role, name: f[key] || def.fixedName || "", applicable: true,
+      email: f[key + "Email"] || "", position: f[key + "Position"] || def.role,
+      status: SP_STATUS_TO_STAGE[f[key + "ApprovalStatus"]] || "waiting",
+      date: f[key + "ApprovalDate"] ? localISODate(new Date(f[key + "ApprovalDate"])) : null,
+      comments: f[key + "Comments"] || "", rejectReason: f[key + "RejectReason"] || ""
+    };
+  });
+  const rows = await listRecipientExpenseRows(Number(item.id));
+  const dir = (typeof App !== "undefined" && App.state && App.state.recipients) || [];
+  const recipients = rows.map(r => {
+    const d = dir.find(x => String(x.id) === String(r.RecipientIDLookupId)) || {};
+    return { name: r.Title || d.name || "", position: d.position || "", company: d.company || "", relationship: d.relationship || "", isOfficial: d.isOfficial || "No", recipientId: r.RecipientIDLookupId || "" };
+  });
+  const who = item.createdBy && item.createdBy.user || {};
+  return {
+    id: "sp-" + item.id, live: true, spId: item.id, refNo: f.FCPANo,
+    submittedBy: who.displayName || f.NameofRequestor || "", submitterEmail: who.email || "",
+    requestor: { name: f.NameofRequestor || "", employeeNo: f.EmployeeNo || "", department: f.Department || "", position: f.Position || "", email: f.Email || "", higherManagement: hm },
+    recipients, transactionTypes: Array.isArray(f.ProposedTransaction) ? f.ProposedTransaction : [],
+    description: f.ProposedTransactionDescription || "", currency: f.Currency || "",
+    amounts: { gifts: f.Gifts || 0, meals: f.Meals || 0, entertainment: f.Entertainment || 0, airfare: f.Airfare || 0, transportation: f.Transportation || 0, hotel: f.Hotel || 0, othersLabel: f.OthersType || "", othersAmount: f.OthersAmount || 0 },
+    paymentTo: f.PaymentInfo || "", remarks: f.Remarks || "", departmentHead: f.Gate0DH || "",
+    dateSubmitted: item.createdDateTime ? localISODate(new Date(item.createdDateTime)) : null,
+    approvals, status: SP_GATE0_TO_STATUS[f.Gate0] || "Pending", claim: null
+  };
+}
+
+// Brings one request in from SharePoint (by ABC reference number) and returns it,
+// or null if there is no such row. A copy already in this browser keeps its own
+// data; only its stage statuses / overall status are refreshed from SharePoint.
+async function importPreApprovalByRef(refNo) {
+  const siteId = await getSiteId();
+  const filter = encodeURIComponent(`fields/FCPANo eq '${String(refNo).replace(/'/g, "''")}'`);
+  const data = await graphFetch(
+    `/sites/${siteId}/lists/${resolveListRef("ABC Pre-Approval")}/items?$filter=${filter}&$expand=fields`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+  );
+  const item = data.value && data.value[0];
+  if (!item) return null;
+  return mergeImportedPreApproval(await buildPreApprovalFromRow(item));
+}
+
+function mergeImportedPreApproval(fresh) {
+  const mine = Store.getByRef(fresh.refNo);
+  if (!mine) { Store.state.preApprovals.unshift(fresh); Store.save(); return fresh; }
+  mine.approvals = fresh.approvals; mine.status = fresh.status; mine.spId = mine.spId || fresh.spId;
+  Store.save();
+  return mine;
+}
+
+// Imports every Pre-Approval that is still Pending in SharePoint — what the
+// Approver Console lists for people (and admins) who did not submit them.
+async function importPendingPreApprovals() {
+  const siteId = await getSiteId();
+  const filter = encodeURIComponent("fields/Gate0 eq 'Pending'");
+  const data = await graphFetch(
+    `/sites/${siteId}/lists/${resolveListRef("ABC Pre-Approval")}/items?$filter=${filter}&$expand=fields&$top=100`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+  );
+  let n = 0;
+  for (const item of (data.value || [])) { mergeImportedPreApproval(await buildPreApprovalFromRow(item)); n++; }
+  return n;
 }
 
 /* --------------------------------------------------------------------------
@@ -802,6 +883,7 @@ const Store = {
     this.state.preApprovals.unshift(rec);
     this.save();
     rec.notify = pendingNotifyTarget(rec.approvals);
+    this.notifyWaiting(rec, "preapproval");
 
     if (typeof isGraphConnected === "function" && isGraphConnected()) {
       try {
@@ -826,6 +908,58 @@ const Store = {
     const claimWasClosed = !!(rec.claim && rec.claim.status === "Closed");
     this.markCancelled(rec, reason || "");
     this.syncDecision(rec, () => saveCancellation(rec, claimWasClosed));
+  },
+
+  /* ---- Email + Teams notifications (see notify.js) ------------------------
+     Only for requests submitted from this app, and only to real addresses
+     found in the ABC Authority roster / Entra directory (never a guessed one).
+     Fire-and-forget: a failed notification never affects the decision. */
+  _formName(which) { return which === "claim" ? "Claim Form" : "Pre-Approval"; },
+  _factLines(rec) {
+    const e = s => Notify.esc(s);
+    const lines = [`<b>Requestor:</b> ${e(rec.requestor && rec.requestor.name)}`];
+    if (rec.submittedBy && rec.submittedBy !== (rec.requestor && rec.requestor.name)) lines.push(`<b>Submitted by:</b> ${e(rec.submittedBy)}`);
+    if (rec.description) lines.push(`<b>Description:</b> ${e(rec.description)}`);
+    return lines;
+  },
+  // Tell the stage that is now Pending that it is their turn.
+  notifyWaiting(rec, which) {
+    if (!rec.live || typeof Notify === "undefined" || !Notify.enabled) return;
+    const stages = which === "claim" ? (rec.claim && rec.claim.approvals) : rec.approvals;
+    const stage = (stages || []).find(s => s.status === "pending");
+    if (!stage || !stage.email) return;
+    const form = this._formName(which);
+    Notify.send({
+      toEmail: stage.email, rec,
+      subject: `${form} ${rec.refNo} is waiting for your approval (${stage.title})`,
+      intro: `Hi ${Notify.esc(stage.name)}, a ${form} is waiting for your approval as ${Notify.esc(stage.title)}.`,
+      lines: this._factLines(rec)
+    });
+  },
+  // Tell the submitter how it ended (rejected, or fully approved).
+  notifyOutcome(rec, which, stage, action) {
+    if (!rec.live || typeof Notify === "undefined" || !Notify.enabled) return;
+    const to = rec.submitterEmail || (rec.requestor && rec.requestor.email);
+    if (!to) return;
+    const form = this._formName(which);
+    const rejected = action === "reject";
+    Notify.send({
+      toEmail: to, rec,
+      subject: rejected ? `${form} ${rec.refNo} was rejected (${stage.title})` : `${form} ${rec.refNo} is fully approved`,
+      intro: rejected
+        ? `Your ${form} was rejected by ${Notify.esc(stage.name)} (${Notify.esc(stage.title)}).`
+        : `Your ${form} has been fully approved.${which === "preapproval" ? " You can now submit the claim." : ""}`,
+      lines: [...this._factLines(rec), ...(rejected && stage.rejectReason ? [`<b>Reason:</b> ${Notify.esc(stage.rejectReason)}`] : [])]
+    });
+  },
+  // After an approve/reject: reject -> tell the submitter; last approval -> tell
+  // the submitter; otherwise -> tell the next approver.
+  notifyAfterDecision(rec, which, stageIndex, action) {
+    const stages = which === "claim" ? rec.claim.approvals : rec.approvals;
+    const stage = stages[stageIndex];
+    const finished = which === "claim" ? rec.claim.status === "Closed" : rec.status === "Approved";
+    if (action === "reject" || finished) this.notifyOutcome(rec, which, stage, action);
+    else this.notifyWaiting(rec, which);
   },
 
   // Cancels just the claim; the Pre-Approval stays as it is (Closed).
@@ -928,6 +1062,7 @@ const Store = {
       await saveRecipientExpenses(rec); // each recipient's equal USD share of the claim
       this.save();
     });
+    this.notifyWaiting(rec, "claim");
     return pendingNotifyTarget(rec.claim.approvals);
   },
 
@@ -944,6 +1079,7 @@ const Store = {
       if (rec.status === "Approved") await createOpenClaimRow(rec);
       this.save();
     });
+    this.notifyAfterDecision(rec, "preapproval", stageIndex, action);
     return action === "approve" ? pendingNotifyTarget(rec.approvals) : null;
   },
 
@@ -969,6 +1105,7 @@ const Store = {
     rec.claim.status = chainOverallStatus(rec.claim.approvals, "Open", "Closed");
     this.save();
     this.syncDecision(rec, () => saveClaimDecision(rec, stageIndex).then(() => this.save()));
+    this.notifyAfterDecision(rec, "claim", stageIndex, action);
     return action === "approve" ? pendingNotifyTarget(rec.claim.approvals) : null;
   },
 
