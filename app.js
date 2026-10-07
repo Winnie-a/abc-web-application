@@ -13,7 +13,23 @@ function pillClass(status) {
   if (s === "pending" || s === "open" || s === "waiting") return "pill-pending";
   if (s === "approved" || s === "closed") return "pill-approved";
   if (s === "rejected") return "pill-rejected";
+  if (s === "cancelled" || s === "-") return "pill-cancelled";
   return "pill-pending";
+}
+
+/* Status words shown on screen and used by the filters — the same values as
+   the SharePoint "Gate 0" (Pre-Approval) and "Gate 1" (Claim) columns, as in
+   the FCPA lists. "Overdue" is deliberately not used: only the Power Automate
+   flows set it (their approval time-out). The app's own internal statuses
+   (Approved, ...) are unchanged — these helpers only translate for display. */
+function preApprovalGateLabel(rec) {            // Gate 0: Pending | Closed | Rejected | Cancelled
+  return rec.status === "Approved" ? "Closed" : rec.status;
+}
+function claimGateLabel(rec) {                   // Gate 1: Open | Pending | Closed | Cancelled (+ Rejected)
+  const c = rec.claim;
+  if (!c) return rec.status === "Approved" ? "Open" : "-"; // a Closed Pre-Approval owns an Open claim
+  if (c.status === "Closed" || c.status === "Rejected" || c.status === "Cancelled") return c.status;
+  return c.submittedDate ? "Pending" : "Open";
 }
 function stagePillClass(status) {
   if (status === "approved") return "pill-approved";
@@ -849,7 +865,7 @@ const App = {
         <td>${esc(r.requestor.name)}</td>
         <td>${esc(r.submittedBy || r.requestor.name)}</td>
         <td>${fmtDate(r.dateSubmitted)}</td>
-        <td><span class="pill ${pillClass(r.status)}">${esc(r.status)}</span></td>
+        <td><span class="pill ${pillClass(preApprovalGateLabel(r))}">${esc(preApprovalGateLabel(r))}</span></td>
         <td>
           <button class="btn-icon" title="View" onclick="App.openDetail('${r.id}','preapproval')">&#128065;</button>
           ${(r.status === "Pending" || r.status === "Approved") ? `<button class="btn-icon" title="Cancel / Withdraw" onclick="App.openCancelModal('${r.id}')">&#10005;</button>` : ""}
@@ -870,9 +886,9 @@ const App = {
   renderClaimList(all, requestorNames) {
     const sub = this.state.sub;
     let recs = this.filteredRecs("claim");
-    if (sub.claimStatus && sub.claimStatus !== "All") recs = recs.filter(r => (r.claim ? r.claim.status : "Open") === sub.claimStatus);
+    if (sub.claimStatus && sub.claimStatus !== "All") recs = recs.filter(r => claimGateLabel(r) === sub.claimStatus);
     const rows = recs.map(r => {
-      const cs = r.claim ? r.claim.status : "Open";
+      const cs = claimGateLabel(r);
       return `<tr>
         <td><a class="ref-link" onclick="App.openDetail('${r.id}','claim')">${esc(r.refNo)}</a></td>
         <td>${esc(r.requestor.name)}</td>
@@ -887,7 +903,7 @@ const App = {
     <div class="filters" style="margin-top:-14px;">
       <div class="field"><label>Claim Status</label>
         <select onchange="App.state.sub.claimStatus=this.value;App.render();">
-          ${["All", "Open", "Closed", "Rejected", "Cancelled"].map(s => `<option ${sub.claimStatus === s ? "selected" : ""}>${s}</option>`).join("")}
+          ${["All", "Open", "Pending"].map(s => `<option ${sub.claimStatus === s ? "selected" : ""}>${s}</option>`).join("")}
         </select>
       </div>
     </div>
@@ -904,16 +920,16 @@ const App = {
   renderHistoryList(all, requestorNames) {
     const sub = this.state.sub;
     let recs = this.filteredRecs("history");
-    if (sub.preApprovalStatus && sub.preApprovalStatus !== "All") recs = recs.filter(r => r.status === sub.preApprovalStatus);
-    if (sub.claimStatus && sub.claimStatus !== "All") recs = recs.filter(r => (r.claim ? r.claim.status : "-") === sub.claimStatus);
+    if (sub.preApprovalStatus && sub.preApprovalStatus !== "All") recs = recs.filter(r => preApprovalGateLabel(r) === sub.preApprovalStatus);
+    if (sub.claimStatus && sub.claimStatus !== "All") recs = recs.filter(r => claimGateLabel(r) === sub.claimStatus);
     const rows = recs.map(r => `
       <tr>
         <td><a class="ref-link" onclick="App.openDetail('${r.id}','history')">${esc(r.refNo)}</a></td>
         <td>${esc(r.requestor.name)}</td>
         <td>${esc(r.submittedBy || r.requestor.name)}</td>
         <td>${fmtDate(r.dateSubmitted)}</td>
-        <td><span class="pill ${pillClass(r.status)}">${esc(r.status)}</span></td>
-        <td><span class="pill ${pillClass(r.claim ? r.claim.status : "-")}">${esc(r.claim ? r.claim.status : "-")}</span></td>
+        <td><span class="pill ${pillClass(preApprovalGateLabel(r))}">${esc(preApprovalGateLabel(r))}</span></td>
+        <td><span class="pill ${pillClass(claimGateLabel(r))}">${esc(claimGateLabel(r))}</span></td>
         <td><button class="btn-icon" title="View" onclick="App.openDetail('${r.id}','history')">&#128065;</button></td>
       </tr>`).join("");
     return `
@@ -921,7 +937,7 @@ const App = {
     <div class="filters" style="margin-top:-14px;">
       <div class="field"><label>Pre-Approval Status</label>
         <select onchange="App.state.sub.preApprovalStatus=this.value;App.render();">
-          ${["All", "Approved", "Rejected", "Cancelled"].map(s => `<option ${sub.preApprovalStatus === s ? "selected" : ""}>${s}</option>`).join("")}
+          ${["All", "Closed", "Rejected", "Cancelled"].map(s => `<option ${sub.preApprovalStatus === s ? "selected" : ""}>${s}</option>`).join("")}
         </select>
       </div>
       <div class="field"><label>Claim Status</label>
@@ -1006,8 +1022,8 @@ const App = {
     <div class="page">
       <div class="page-header">
         <h2>${d.rail === "claim" ? "Claim Form" : d.rail === "approval" ? "Approval Status" : "Gift, Meal, Travel & Entertainment Pre-Approval Form"}
-          ${d.rail === "preapproval" ? `<span class="pill ${pillClass(rec.status)}">Pre-Approval ${esc(rec.status)}</span>` : ""}
-          ${d.rail === "claim" && rec.claim ? `<span class="pill ${pillClass(rec.claim.status)}">Claim ${esc(rec.claim.status)}</span>` : ""}
+          ${d.rail === "preapproval" ? `<span class="pill ${pillClass(preApprovalGateLabel(rec))}">Pre-Approval ${esc(preApprovalGateLabel(rec))}</span>` : ""}
+          ${d.rail === "claim" && rec.claim ? `<span class="pill ${pillClass(claimGateLabel(rec))}">Claim ${esc(claimGateLabel(rec))}</span>` : ""}
         </h2>
         <button class="btn btn-secondary" onclick="App.closeDetail()">Back</button>
       </div>
@@ -1286,10 +1302,34 @@ const App = {
     </div>`;
   },
 
-  actOnStage(which, id, stageIndex, action) {
+  async actOnStage(which, id, stageIndex, action) {
     const comments = (document.getElementById("approveComments") || {}).value || "";
     const rejectReason = (document.getElementById("rejectReason") || {}).value || "";
     if (action === "reject" && !rejectReason) { this.toast("Please provide a reject reason."); return; }
+    if (this.state.actingBusy) return; // ignore a second click while the check below is running
+    this.state.actingBusy = true;
+    try {
+      // Like the flows' "Get item -> IsCancelled" step after each approval: if
+      // the request was cancelled (here or in the Power App) don't record this
+      // decision. If SharePoint can't be read, refuse rather than guess.
+      let cancelled;
+      try {
+        cancelled = await Store.checkCancelled(id, which);
+      } catch (e) {
+        console.error("Cancellation check failed", e);
+        this.toast("Couldn't confirm this request is still active — nothing was recorded. Please try again.");
+        return;
+      }
+      if (cancelled) {
+        this.toast("This request has been cancelled — your decision was not recorded.");
+        this.state.view = "approverHome";
+        this.state.detail = null;
+        this.render();
+        return;
+      }
+    } finally {
+      this.state.actingBusy = false;
+    }
     const notifyTarget = which === "claim"
       ? Store.actOnClaim(id, stageIndex, action, comments, rejectReason)
       : Store.actOnPreApproval(id, stageIndex, action, comments, rejectReason);

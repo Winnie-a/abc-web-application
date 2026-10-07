@@ -501,8 +501,16 @@ function claimGateFields(stages, idx) {
   return f;
 }
 
+// The claim row's SharePoint id lives on the request itself (rec.claimSpId):
+// the row can exist (Gate 1 = Open) before the app has a local claim object.
+// rec.claim.spId is the older location, still honoured.
+function setClaimRowId(rec, id) {
+  rec.claimSpId = id;
+  if (rec.claim) rec.claim.spId = id;
+}
 async function findClaimRowId(rec) {
-  if (rec.claim.spId) return rec.claim.spId;
+  const known = rec.claimSpId || (rec.claim && rec.claim.spId);
+  if (known) return known;
   const siteId = await getSiteId();
   const filter = encodeURIComponent(`fields/Title eq '${String(rec.refNo).replace(/'/g, "''")}'`);
   const data = await graphFetch(
@@ -510,12 +518,27 @@ async function findClaimRowId(rec) {
     { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
   );
   const row = data.value && data.value[0];
-  if (row) rec.claim.spId = row.id;
+  if (row) setClaimRowId(rec, row.id);
   return row ? row.id : null;
 }
 
-// Creates the claim's ABC Claim Form row (header + every approval stage in its
-// current state). Line items and the recipient register are not pushed yet.
+// Same as the flows' "Create claim form" step: when the LAST Pre-Approval stage
+// approves (Gate 0 = Closed), the claim row is created with Gate 1 = "Open",
+// ready for the claim to be filled in and submitted. Does nothing if the row
+// already exists.
+async function createOpenClaimRow(rec) {
+  if (await findClaimRowId(rec)) return;
+  const fields = { Title: rec.refNo, Gate1: "Open", IsCancelled: false };
+  const preId = Number(await findPreApprovalRowId(rec));
+  if (Number.isFinite(preId) && preId > 0) fields.ABCNoLookupId = preId;
+  const item = await graphCreateItem("ABC Claim Form", fields);
+  setClaimRowId(rec, item.id);
+}
+
+// Claim submit: fills in the claim's ABC Claim Form row (header + every
+// approval stage in its current state) and moves Gate 1 to Pending. Updates the
+// "Open" row created by createOpenClaimRow() — or creates the row if there
+// isn't one yet. Line items and the recipient register are not pushed yet.
 async function pushClaimToSharePoint(rec) {
   const c = rec.claim;
   const fields = {
@@ -536,8 +559,13 @@ async function pushClaimToSharePoint(rec) {
   // "FCPANo" lookup still points at FCPA Pre-Approval, so it stays empty).
   const preId = Number(await findPreApprovalRowId(rec));
   if (Number.isFinite(preId) && preId > 0) fields.ABCNoLookupId = preId;
-  const item = await graphCreateItem("ABC Claim Form", fields);
-  c.spId = item.id;
+  const existingId = await findClaimRowId(rec);
+  if (existingId) {
+    await graphUpdateItem("ABC Claim Form", existingId, fields);
+  } else {
+    const item = await graphCreateItem("ABC Claim Form", fields);
+    setClaimRowId(rec, item.id);
+  }
 }
 
 // Saves ONE approve/reject on a Claim stage — same shape as
@@ -560,6 +588,45 @@ async function saveClaimDecision(rec, stageIndex) {
   if (stage.status === "approved" && next) fields[claimStageColumns(stages, stageIndex + 1).status] = "Pending";
   if (overall === "Closed") fields.CompleteApprovalDate = stage.date;
   await graphUpdateItem("ABC Claim Form", itemId, fields);
+}
+
+/* --------------------------------------------------------------------------
+   Cancellation (same behaviour as the Power Automate flows: Gate0 / Gate1 =
+   "Cancelled" and IsCancelled = true on the row, and every approval step
+   re-checks IsCancelled before it acts).
+   -------------------------------------------------------------------------- */
+
+// Writes a cancellation to SharePoint: the Pre-Approval row (Gate 0 =
+// Cancelled), and its claim row (Gate 1 = Cancelled) unless the claim was
+// already Closed. Rows that were never saved are skipped — there is nothing to
+// cancel there.
+async function saveCancellation(rec, claimWasClosed) {
+  const preId = await findPreApprovalRowId(rec);
+  if (preId) await graphUpdateItem("ABC Pre-Approval", preId, { Gate0: "Cancelled", IsCancelled: true });
+  if (!claimWasClosed) {
+    const claimId = await findClaimRowId(rec);
+    if (claimId) await graphUpdateItem("ABC Claim Form", claimId, { Gate1: "Cancelled", IsCancelled: true });
+  }
+}
+
+// Fresh read of SharePoint to see whether this request (or, for a claim
+// decision, its claim) has been cancelled — by this app, or by anyone using
+// the Power App / flows. Resolves true if cancelled (and marks the local copy
+// cancelled too). Throws if SharePoint can't be read.
+async function isCancelledInSharePoint(rec, which) {
+  const preId = await findPreApprovalRowId(rec);
+  if (preId) {
+    const f = await graphGetItemFields("ABC Pre-Approval", preId, ["IsCancelled", "Gate0"]);
+    if (f.IsCancelled === true || f.Gate0 === "Cancelled") return true;
+  }
+  if (which === "claim") {
+    const claimId = await findClaimRowId(rec);
+    if (claimId) {
+      const f = await graphGetItemFields("ABC Claim Form", claimId, ["IsCancelled", "Gate1"]);
+      if (f.IsCancelled === true || f.Gate1 === "Cancelled") return true;
+    }
+  }
+  return false;
 }
 
 const Store = {
@@ -639,11 +706,36 @@ const Store = {
   cancelPreApproval(id, reason) {
     const rec = this.get(id);
     if (!rec) return;
+    const claimWasClosed = !!(rec.claim && rec.claim.status === "Closed");
+    this.markCancelled(rec, reason || "");
+    this.syncDecision(rec, () => saveCancellation(rec, claimWasClosed));
+  },
+
+  // Local half of a cancellation (also used when SharePoint says it was
+  // cancelled elsewhere).
+  markCancelled(rec, reason) {
     rec.status = "Cancelled";
-    rec.cancelReason = reason || "";
+    rec.cancelReason = reason;
     rec.cancelDate = todayISO();
     if (rec.claim && rec.claim.status === "Open") rec.claim.status = "Cancelled";
     this.save();
+  },
+
+  /* Called by the Approver Console before it records an approve/reject.
+     Resolves true if the request is cancelled — the local copy is then marked
+     cancelled and the decision must NOT be recorded (the flows do the same:
+     Terminate "Cancelled"). Only requests submitted from this app are checked.
+     If SharePoint can't be read it THROWS, so the caller can refuse rather than
+     approve something that may already have been withdrawn. */
+  async checkCancelled(id, which) {
+    const rec = this.get(id);
+    if (!rec || !rec.live || typeof isGraphConnected !== "function" || !isGraphConnected()) return false;
+    if (rec.status === "Cancelled") return true;
+    if (await isCancelledInSharePoint(rec, which)) {
+      this.markCancelled(rec, "Cancelled in SharePoint (Power App or another user).");
+      return true;
+    }
+    return false;
   },
 
   ensureClaim(id) {
@@ -710,7 +802,12 @@ const Store = {
     advanceChain(rec.approvals, stageIndex, action, comments, rejectReason);
     rec.status = chainOverallStatus(rec.approvals, "Pending", "Approved");
     this.save();
-    this.syncDecision(rec, () => savePreApprovalDecision(rec, stageIndex));
+    this.syncDecision(rec, async () => {
+      await savePreApprovalDecision(rec, stageIndex);
+      // Last stage approved -> Gate 0 is now Closed; open the claim (Gate 1 = Open).
+      if (rec.status === "Approved") await createOpenClaimRow(rec);
+      this.save();
+    });
     return action === "approve" ? pendingNotifyTarget(rec.approvals) : null;
   },
 

@@ -169,6 +169,7 @@ table.data tr:hover td{background:#fafbfd;}
 .pill-pending,.pill-open{background:var(--amber-bg);color:var(--amber-text);}
 .pill-approved,.pill-closed{background:var(--green-bg);color:var(--green-text);}
 .pill-rejected{background:var(--red-bg);color:var(--red-text);}
+.pill-cancelled{background:#e5e7eb;color:#4b5563;}
 
 /* ---------- Recipient / find combo ---------- */
 .combo{position:relative;}

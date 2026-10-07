@@ -171,6 +171,15 @@ async function graphUpdateItem(listName, itemId, fields) {
   });
 }
 
+// Reads just the named columns of one list item (fresh from SharePoint, no
+// caching) — used to re-check IsCancelled / Gate before acting on a request.
+async function graphGetItemFields(listName, itemId, selectFields) {
+  const siteId = await getSiteId();
+  const ref = resolveListRef(listName);
+  const item = await graphFetch(`/sites/${siteId}/lists/${ref}/items/${itemId}?$expand=fields($select=${selectFields.join(",")})`);
+  return item.fields || {};
+}
+
 async function graphDeleteItem(listName, itemId) {
   const siteId = await getSiteId();
   const ref = resolveListRef(listName);
