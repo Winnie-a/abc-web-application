@@ -82,7 +82,7 @@ const App = {
   /* Whether the signed-in Microsoft account is also one of the named
      approver roles (CFO, GCOO, MD, EXCO, Compliance Committee, DH,
      HOD/SHOD, ...) from data.js, OR is in ADMIN_USERS (data.js) — either way
-     decides whether the Approver Console nav link / home button shows up.
+     decides whether the Approver Console home button shows up.
      Replaces the old, unauthenticated "Approver sign-in" picker: acting on a
      stage now requires actually being signed in as that real person, not
      just selecting their name from a dropdown — an admin gets full
@@ -225,7 +225,6 @@ const App = {
     <div class="topbar">
       <div class="brand" onclick="App.goHome()" style="cursor:pointer">ABC <small>&nbsp;Pre-Approval &amp; Claims</small></div>
       <div class="user">
-        ${this.isApproverUser() ? `<a onclick="App.openApproverConsole()">Approver Console</a>` : ""}
         <span>${who}</span>
         <div class="avatar">${initials(s.employee.name)}</div>
         <button class="signout" onclick="App.signOut()">Sign out</button>
