@@ -594,6 +594,103 @@ async function saveClaimDecision(rec, stageIndex) {
 }
 
 /* --------------------------------------------------------------------------
+   Recipient Final Expenses — per-recipient spend, the data behind the
+   six-month history. Worked out from the FCPA lists (2026-10-07): the Power
+   App takes each claim line in USD (amount ÷ conversion rate, the same
+   conversion as the claim total), puts it in the column for its transaction
+   type (Gifts / Meals / Entertainment / Travel / Others) and divides it
+   EQUALLY between the recipients on the claim. Done when the claim is
+   submitted, so the figures are in place before approvals finish; the history
+   only counts them once the claim is Closed.
+   -------------------------------------------------------------------------- */
+const EXPENSE_CATEGORIES = ["Gifts", "Meals", "Entertainment", "Travel", "Others"];
+const RECIPIENT_EXPENSE_LIST = "ABC Recipient Final Expenses";
+
+function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+// Claim lines -> USD total per expense column. A transaction type that isn't
+// one of the columns counts as Others.
+function claimCategoryTotalsUSD(claim) {
+  const cur = claimCurrency(claim);
+  const totals = { Gifts: 0, Meals: 0, Entertainment: 0, Travel: 0, Others: 0 };
+  (claim.lineItems || []).forEach(li => {
+    const key = EXPENSE_CATEGORIES.includes(li.transactionType) ? li.transactionType : "Others";
+    totals[key] += lineAmountUSD(lineAmount(li), lineRate(li, claim), cur);
+  });
+  EXPENSE_CATEGORIES.forEach(k => { totals[k] = round2(totals[k]); });
+  return totals;
+}
+
+// total split into n equal shares to the cent; any leftover cents go to the
+// first recipient so the shares always add back up to the total exactly.
+function splitEvenly(total, n) {
+  const cents = Math.round(total * 100);
+  const base = Math.floor(cents / n);
+  const shares = Array(n).fill(base / 100);
+  shares[0] = (base + (cents - base * n)) / 100;
+  return shares;
+}
+
+function recipientIdFor(rec, person) {
+  const name = String(person.name || "").trim().toLowerCase();
+  const fromRequest = (rec.recipients || []).find(r => String(r.name || "").trim().toLowerCase() === name && r.recipientId);
+  if (fromRequest) return Number(fromRequest.recipientId);
+  const dir = (typeof App !== "undefined" && App.state && App.state.recipients) || [];
+  const hit = dir.find(r => String(r.name || "").trim().toLowerCase() === name && (!person.company || r.company === person.company));
+  return hit ? Number(hit.id) : 0;
+}
+
+// This request's rows in the list (they were created at Pre-Approval submit).
+async function listRecipientExpenseRows(preId) {
+  try {
+    const siteId = await getSiteId();
+    const filter = encodeURIComponent(`fields/ABCNoLookupId eq ${preId}`);
+    const data = await graphFetch(
+      `/sites/${siteId}/lists/${resolveListRef(RECIPIENT_EXPENSE_LIST)}/items?$filter=${filter}&$expand=fields($select=Title,ABCNoLookupId)`,
+      { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+    );
+    return (data.value || []).map(i => ({ id: i.id, ...i.fields }));
+  } catch (e) {
+    // server-side filter refused -> read the (small) list and filter here
+    const all = await graphListAllItems(RECIPIENT_EXPENSE_LIST, ["Title", "ABCNoLookupId"]);
+    return all.filter(r => Number(r.ABCNoLookupId) === Number(preId));
+  }
+}
+
+// Fills in each claim-register recipient's share. A register recipient with no
+// row yet (added at claim time) gets one; recipients removed from the register
+// keep their row untouched. A per-recipient "Others" amount typed in the
+// register is added to that recipient's Others.
+async function saveRecipientExpenses(rec) {
+  const claim = rec.claim;
+  const people = (claim && claim.register && claim.register.recipients) || [];
+  if (!people.length) return;
+  const preId = Number(await findPreApprovalRowId(rec));
+  if (!(preId > 0)) return;
+  const totals = claimCategoryTotalsUSD(claim);
+  const shares = {};
+  EXPENSE_CATEGORIES.forEach(k => { shares[k] = splitEvenly(totals[k], people.length); });
+  const rows = await listRecipientExpenseRows(preId);
+  const used = new Set();
+  for (let i = 0; i < people.length; i++) {
+    const p = people[i];
+    const name = String(p.name || "").trim().toLowerCase();
+    const row = rows.find(r => !used.has(r.id) && String(r.Title || "").trim().toLowerCase() === name);
+    if (row) used.add(row.id);
+    const fields = {};
+    EXPENSE_CATEGORIES.forEach(k => { fields[k] = shares[k][i]; });
+    fields.Others = round2(fields.Others + (Number(p.others) || 0));
+    if (p.date) fields.ClaimRegisterDate = p.date;
+    if (row) {
+      await graphUpdateItem(RECIPIENT_EXPENSE_LIST, row.id, fields);
+    } else {
+      const rid = recipientIdFor(rec, p);
+      await graphCreateItem(RECIPIENT_EXPENSE_LIST, { Title: p.name || "", ABCNoLookupId: preId, ...(rid ? { RecipientIDLookupId: rid } : {}), ...fields });
+    }
+  }
+}
+
+/* --------------------------------------------------------------------------
    Cancellation (same behaviour as the Power Automate flows: Gate0 / Gate1 =
    "Cancelled" and IsCancelled = true on the row, and every approval step
    re-checks IsCancelled before it acts).
@@ -826,7 +923,11 @@ const Store = {
     rec.claim.approvals = buildChain(claimChainDef(isHigherManagement(rec.requestor), claimActualUSD(rec.claim)), chainResolveMap(rec.requestor, rec.departmentHead));
     rec.claim.submittedDate = todayISO();
     this.save();
-    this.syncDecision(rec, () => pushClaimToSharePoint(rec).then(() => this.save()));
+    this.syncDecision(rec, async () => {
+      await pushClaimToSharePoint(rec);
+      await saveRecipientExpenses(rec); // each recipient's equal USD share of the claim
+      this.save();
+    });
     return pendingNotifyTarget(rec.claim.approvals);
   },
 
