@@ -345,15 +345,22 @@ async function graphGetAppStatus() {
    those rows were already divided by the claim's conversion rate when the
    claim was submitted, so they're USD — no further conversion here.
 
-   Reads BOTH the ABC lists (the new system, still empty until claims run
-   through it) and the FCPA lists (where the real historical data lives).
-   The FCPA lists are only ever READ here, never written. To stop counting
-   FCPA history, delete that entry from SIX_MONTH_SOURCES.
+   Which lists are read is set by HISTORY_SOURCE below (ABC for testing, FCPA
+   for the real historical data, or BOTH). The FCPA lists are only ever READ
+   here, never written.
    ------------------------------------------------------------------------- */
-const SIX_MONTH_SOURCES = [
-  { label: "ABC",  claims: "ABC Claim Form",  expenses: "ABC Recipient Final Expenses" },
-  { label: "FCPA", claims: "FCPA Claim Form", expenses: "FCPA Recipient Final Expenses" }
+/* Which lists the six-month history reads: "ABC" (testing — only the ABC
+   lists), "FCPA" (the live historical data) or "BOTH". Switching is just
+   changing this one value; nothing in either set of lists is touched. The
+   recipient directory stays on FCPA Customer in every mode. */
+const HISTORY_SOURCE = "ABC";
+// link = the lookup column (into that system's Pre-Approval list) that ties an
+// expense row to its claim: "ABCNo" on the ABC lists, "FCPANo" on the FCPA ones.
+const ALL_SIX_MONTH_SOURCES = [
+  { label: "ABC",  claims: "ABC Claim Form",  expenses: "ABC Recipient Final Expenses",  link: "ABCNo" },
+  { label: "FCPA", claims: "FCPA Claim Form", expenses: "FCPA Recipient Final Expenses", link: "FCPANo" }
 ];
+const SIX_MONTH_SOURCES = ALL_SIX_MONTH_SOURCES.filter(s => HISTORY_SOURCE === "BOTH" || s.label === HISTORY_SOURCE);
 
 function localISODate(d) {
   const p = n => String(n).padStart(2, "0");
@@ -370,19 +377,20 @@ async function graphGetRecipientSpendHistory() {
   let okSources = 0;
   await Promise.all(SIX_MONTH_SOURCES.map(async src => {
     try {
+      const linkId = src.link + "LookupId";
       const [claims, expenses] = await Promise.all([
-        graphListAllItems(src.claims, ["Gate1", "CompleteApprovalDate", "FCPANoLookupId"]),
-        graphListAllItems(src.expenses, ["FCPANoLookupId", "RecipientIDLookupId", "Gifts", "Meals", "Entertainment", "Travel", "Others"])
+        graphListAllItems(src.claims, ["Gate1", "CompleteApprovalDate", linkId]),
+        graphListAllItems(src.expenses, [linkId, "RecipientIDLookupId", "Gifts", "Meals", "Entertainment", "Travel", "Others"])
       ]);
-      const closedOn = new Map(); // FCPA No lookup id -> completion date (ISO)
+      const closedOn = new Map(); // Pre-Approval lookup id -> completion date (ISO)
       claims.forEach(c => {
-        if (c.Gate1 === "Closed" && c.CompleteApprovalDate && c.FCPANoLookupId != null) {
+        if (c.Gate1 === "Closed" && c.CompleteApprovalDate && c[linkId] != null) {
           const done = new Date(c.CompleteApprovalDate);
-          if (done >= since) closedOn.set(String(c.FCPANoLookupId), localISODate(done));
+          if (done >= since) closedOn.set(String(c[linkId]), localISODate(done));
         }
       });
       expenses.forEach(e => {
-        const date = closedOn.get(String(e.FCPANoLookupId));
+        const date = closedOn.get(String(e[linkId]));
         if (!date || e.RecipientIDLookupId == null) return;
         (byRecipient[e.RecipientIDLookupId] = byRecipient[e.RecipientIDLookupId] || []).push({
           date,

@@ -425,18 +425,22 @@ async function pushPreApprovalToSharePoint(rec) {
   const item = await graphCreateItem("ABC Pre-Approval", fields);
   rec.spId = item.id;
 
-  // Recipient rows: recipients are now picked from the live "FCPA Customer"
-  // SharePoint list (see graph.js/app.js), and each carries the real list
-  // item id through as r.recipientId when picked that way. Still written
-  // without a RecipientID field below, though, because the real column
-  // name on "ABC Recipient Final Expenses" itself isn't confirmed yet —
-  // add it here (e.g. RecipientID: r.recipientId) once that list's schema
-  // is confirmed via Graph Explorer, the same way FCPA Customer's was.
+  // Recipient rows (one per recipient). "ABCNo" is a lookup into this
+  // request's ABC Pre-Approval row and "RecipientID" a lookup into the FCPA
+  // Customer list; lookups are written as <Column>LookupId = the target row's
+  // numeric id. Recipients picked from the live FCPA Customer list carry that
+  // id as r.recipientId; one that isn't from the directory has none, so the
+  // RecipientID link is simply left blank for it. (The old "FCPANo" lookup on
+  // this list still points at FCPA Pre-Approval and is not written.)
   for (const r of rec.recipients) {
-    await graphCreateItem("ABC Recipient Final Expenses", {
-      FCPANo: rec.refNo,
+    const row = {
+      Title: r.name || "",
+      ABCNoLookupId: Number(item.id),
       Gifts: 0, Meals: 0, Entertainment: 0, Travel: 0, Others: 0
-    });
+    };
+    const rid = Number(r.recipientId);
+    if (Number.isFinite(rid) && rid > 0) row.RecipientIDLookupId = rid;
+    await graphCreateItem("ABC Recipient Final Expenses", row);
   }
 }
 
@@ -446,9 +450,10 @@ async function pushPreApprovalToSharePoint(rec) {
    approve/reject. Column facts below were read from the live list on
    2026-10-07:
      - Title holds the ABC reference number — that is how a claim row is found
-       again. The list's "FCPANo" lookup is deliberately NOT written: it still
-       points at the FCPA Pre-Approval list (d2160a4e…), so filling it with an
-       ABC Pre-Approval item id would link the claim to an unrelated FCPA row.
+       again. The "ABCNo" lookup (added 2026-10-07) links it to its ABC
+       Pre-Approval row. The older "FCPANo" lookup is deliberately NOT written:
+       it still points at the FCPA Pre-Approval list (d2160a4e…), so an ABC
+       item id there would link the claim to an unrelated FCPA row.
      - Gate1 (overall) choices: Open / Pending / Closed / Cancelled. Same as the
        Power Automate flows: a fully approved claim is Closed, and a rejection
        puts it back to Open (the flows reset Gate1 to Open on any rejection).
@@ -527,6 +532,10 @@ async function pushClaimToSharePoint(rec) {
     IsCancelled: false
   };
   c.approvals.forEach((_, i) => Object.assign(fields, claimGateFields(c.approvals, i)));
+  // "ABCNo" is a lookup into this request's ABC Pre-Approval row (the old
+  // "FCPANo" lookup still points at FCPA Pre-Approval, so it stays empty).
+  const preId = Number(await findPreApprovalRowId(rec));
+  if (Number.isFinite(preId) && preId > 0) fields.ABCNoLookupId = preId;
   const item = await graphCreateItem("ABC Claim Form", fields);
   c.spId = item.id;
 }
