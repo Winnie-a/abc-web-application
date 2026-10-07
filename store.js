@@ -61,10 +61,36 @@ function buildChain(stageDefs, resolveMap) {
     status: "waiting", // waiting | pending | approved | rejected
     date: null,
     comments: "",
-    rejectReason: ""
+    rejectReason: "",
+    // Written to the SharePoint Gate<N><Stage>Email / Position columns. Left
+    // blank (never guessed) when the approver isn't in the ABC Authority
+    // roster or the Entra directory.
+    email: lookupApproverEmail(def.resolve ? (resolveMap[def.resolve] || "") : def.fixedName),
+    position: lookupApproverPosition(def.resolve ? (resolveMap[def.resolve] || "") : def.fixedName) || def.role
   }));
   if (stages.length) stages[0].status = "pending";
   return stages;
+}
+
+/* Real (non-guessed) approver contact details: the admin-managed "ABC
+   Authority" roster first (App.state.approvers), then the Entra ID directory
+   (App.state.directory) matched on display name. Both are only populated
+   after sign-in, so this returns "" for seed/demo data. */
+function _approverRows(name) {
+  if (!name || typeof App === "undefined" || !App.state) return [];
+  const n = name.trim().toLowerCase();
+  const hits = [];
+  (App.state.approvers || []).forEach(r => { if ((r.name || "").trim().toLowerCase() === n) hits.push(r); });
+  (App.state.directory || []).forEach(u => { if ((u.name || "").trim().toLowerCase() === n) hits.push(u); });
+  return hits;
+}
+function lookupApproverEmail(name) {
+  const hit = _approverRows(name).find(r => r.email);
+  return hit ? hit.email : "";
+}
+function lookupApproverPosition(name) {
+  const hit = _approverRows(name).find(r => r.role || r.position);
+  return hit ? (hit.role || hit.position) : "";
 }
 
 function chainOverallStatus(stages, openLabel, closedLabel) {
@@ -302,17 +328,73 @@ function gateColumnKey(stageTitle) {
   return map[stageTitle] || stageTitle.replace(/\s+/g, "");
 }
 
+// The per-stage "...ApprovalStatus" columns are Choice fields that only accept
+// N/A / Pending / Approved / Rejected (verified 2026-10-07 on the live list),
+// so the app's own lowercase statuses are translated here. A "waiting" stage
+// returns null: it hasn't started, so the column is left blank.
+function spStageStatus(status) {
+  return { pending: "Pending", approved: "Approved", rejected: "Rejected" }[status] || null;
+}
+// The overall "Gate0" Choice column: Closed / Pending / Rejected / Cancelled /
+// Overdue. Same wording the Power Automate flows write (Closed = fully approved).
+function spOverallStatus(stages) {
+  if (stages.some(s => s.status === "rejected")) return "Rejected";
+  if (stages.length && stages.every(s => s.status === "approved")) return "Closed";
+  return "Pending";
+}
+
 function gateFields(gatePrefix, stage) {
   const key = gatePrefix + gateColumnKey(stage.title);
-  return {
+  const fields = {
     [key]: stage.name || "",
     [key + "Email"]: stage.email || "",
     [key + "Position"]: stage.position || "",
-    [key + "ApprovalStatus"]: stage.status,
+    [key + "Comments"]: stage.comments || "",
+    [key + "RejectReason"]: stage.rejectReason || ""
+  };
+  const status = spStageStatus(stage.status);
+  if (status) fields[key + "ApprovalStatus"] = status;
+  if (stage.date) fields[key + "ApprovalDate"] = stage.date;
+  return fields;
+}
+
+// SharePoint list item id of this request's ABC Pre-Approval row. Uses the id
+// remembered at submit time; otherwise looks the row up by its FCPA No (the
+// ABC reference number) and remembers it. Resolves to null if there is no row.
+async function findPreApprovalRowId(rec) {
+  if (rec.spId) return rec.spId;
+  const siteId = await getSiteId();
+  const filter = encodeURIComponent(`fields/FCPANo eq '${String(rec.refNo).replace(/'/g, "''")}'`);
+  const data = await graphFetch(
+    `/sites/${siteId}/lists/${resolveListRef("ABC Pre-Approval")}/items?$filter=${filter}&$select=id`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+  );
+  const row = data.value && data.value[0];
+  if (row) rec.spId = row.id;
+  return row ? row.id : null;
+}
+
+// Saves ONE approve/reject decision on a Pre-Approval stage to SharePoint —
+// the stage's own status/date/comments/reject reason, the next stage flipping
+// to Pending, and the overall Gate0 status. Only for requests submitted from
+// this app (rec.live) — seeded demo records are never written. If the request
+// has no SharePoint row yet (e.g. its first save failed), the whole request is
+// created with its current state instead, so nothing is lost.
+async function savePreApprovalDecision(rec, stageIndex) {
+  const stage = rec.approvals[stageIndex];
+  const itemId = await findPreApprovalRowId(rec);
+  if (!itemId) { await pushPreApprovalToSharePoint(rec); return; }
+  const key = "Gate0" + gateColumnKey(stage.title);
+  const fields = {
+    Gate0: spOverallStatus(rec.approvals),
+    [key + "ApprovalStatus"]: spStageStatus(stage.status),
     [key + "ApprovalDate"]: stage.date,
     [key + "Comments"]: stage.comments || "",
     [key + "RejectReason"]: stage.rejectReason || ""
   };
+  const next = rec.approvals[stageIndex + 1];
+  if (stage.status === "approved" && next) fields["Gate0" + gateColumnKey(next.title) + "ApprovalStatus"] = "Pending";
+  await graphUpdateItem("ABC Pre-Approval", itemId, fields);
 }
 
 async function pushPreApprovalToSharePoint(rec) {
@@ -320,7 +402,9 @@ async function pushPreApprovalToSharePoint(rec) {
   const fields = {
     FCPANo: rec.refNo,
     NameofRequestor: rec.requestor.name,
-    SubmittedBy: rec.submittedBy || rec.requestor.name, // who actually filled in and submitted the form — may differ from the requestor (e.g. an assistant submitting on behalf of the COO)
+    // NOTE: no "SubmittedBy" here — that column doesn't exist on the list (checked
+    // 2026-10-07), and Graph rejects the whole create on an unknown field. The
+    // submitter is already recorded by SharePoint's own "Created By".
     EmployeeNo: rec.requestor.employeeNo,
     Department: rec.requestor.department,
     Position: rec.requestor.position,
@@ -332,7 +416,7 @@ async function pushPreApprovalToSharePoint(rec) {
     Transportation: a.transportation, Hotel: a.hotel,
     OthersType: a.othersLabel, OthersAmount: a.othersAmount,
     PaymentInfo: rec.paymentTo, Remarks: rec.remarks,
-    Gate0: rec.status,
+    Gate0: spOverallStatus(rec.approvals),
     IsCancelled: false
   };
   rec.approvals.forEach(stage => Object.assign(fields, gateFields("Gate0", stage)));
@@ -404,7 +488,9 @@ const Store = {
   },
 
   async createPreApproval(draft) {
-    const rec = { ...draft, id: uid(), refNo: genRefNo(draft.submitterCountry), dateSubmitted: todayISO(), status: "Pending", claim: null };
+    // live = submitted from this app (as opposed to the seeded demo records);
+    // only live requests are ever written to SharePoint on approve/reject.
+    const rec = { ...draft, id: uid(), live: true, refNo: genRefNo(draft.submitterCountry), dateSubmitted: todayISO(), status: "Pending", claim: null };
     rec.approvals = buildChain(preApprovalChainDef(isHigherManagement(rec.requestor)), chainResolveMap(rec.requestor, rec.departmentHead));
     this.state.preApprovals.unshift(rec);
     this.save();
@@ -413,6 +499,7 @@ const Store = {
     if (typeof isGraphConnected === "function" && isGraphConnected()) {
       try {
         await pushPreApprovalToSharePoint(rec);
+        this.save(); // remember rec.spId
       } catch (e) {
         // Field-name mismatches are expected until the internal SharePoint
         // column names are verified against this best-guess mapping — see
@@ -499,7 +586,24 @@ const Store = {
     advanceChain(rec.approvals, stageIndex, action, comments, rejectReason);
     rec.status = chainOverallStatus(rec.approvals, "Pending", "Approved");
     this.save();
+    this.syncDecision(rec, () => savePreApprovalDecision(rec, stageIndex));
     return action === "approve" ? pendingNotifyTarget(rec.approvals) : null;
+  },
+
+  /* Fire-and-forget SharePoint save for an approve/reject. The decision is
+     already applied locally (so the UI never waits on the network); if the
+     SharePoint write fails the request keeps working locally, the error is
+     remembered on rec.syncError, and the user gets a toast. */
+  syncDecision(rec, saveFn) {
+    if (!rec.live || typeof isGraphConnected !== "function" || !isGraphConnected()) return;
+    saveFn().then(() => {
+      if (rec.syncError) { rec.syncError = ""; this.save(); }
+    }).catch(e => {
+      console.error("SharePoint save failed for", rec.refNo, e);
+      rec.syncError = (e && e.message) || String(e);
+      this.save();
+      if (typeof App !== "undefined" && App.toast) App.toast("Decision recorded here, but saving it to SharePoint failed — see console.");
+    });
   },
   actOnClaim(id, stageIndex, action, comments, rejectReason) {
     const rec = this.get(id);
