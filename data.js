@@ -204,8 +204,10 @@ function orgLineFor(team) {
      Claim · Standard:  HOD -> SHOD -> DH -> CFO -> GCOO -> [MD] -> [EXCO Members]
      Claim · Higher Mgmt:            CFO -> GCOO -> [MD] -> [EXCO Members]
    The Claim flow DOES have amount-based gating (confirmed with Winnie
-   2026-09-07, against the total claim amount converted to USD via
-   claimActualUSD()): everyone always goes up to GCOO; MD and then EXCO
+   2026-09-07, and re-confirmed 2026-10-07 against the final "Claim Form
+   Approval Flow" chart, which shows MD / EXCO Members without their amount
+   conditions), against the total claim amount converted to USD via
+   claimActualUSD(): everyone always goes up to GCOO; MD and then EXCO
    Members are conditionally appended on top —
      <= USD 7,500              -> stop after GCOO
      USD 7,501 - 25,000        -> also requires MD

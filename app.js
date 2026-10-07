@@ -38,7 +38,9 @@ const App = {
     dhOptions: [], // live FCPA DH group members, populated on real sign-in — see signInWithMicrosoft()
     directory: [], // live staff directory (every user), populated on real sign-in — see signInWithMicrosoft()
     approvers: [], // live "ABC Authority" roster (CFO/GCOO/MD/EXCO/Compliance name+email) — read-only here; edited directly in the SharePoint list
-    recipients: [] // live "FCPA Customer" roster (recipient name/position/company/relationship), populated on real sign-in — see signInWithMicrosoft()
+    recipients: [], // live "FCPA Customer" roster (recipient name/position/company/relationship), populated on real sign-in — see signInWithMicrosoft()
+    history: { status: "idle", byRecipient: {}, warnings: [], error: "" }, // real six-month spend per recipient (idle|loading|ready|error) — see ensureRecipientHistory()
+    appStatus: "" // AppConfig row 1 "Status" text — "Maintenance" locks the app (see graphGetAppStatus())
   },
 
   init() {
@@ -66,6 +68,8 @@ const App = {
     this.state.sub = null;
     this.state.detail = null;
     this.state.approver = null;
+    this.state.history = { status: "idle", byRecipient: {}, warnings: [], error: "" };
+    this.state.appStatus = "";
     this.render();
   },
 
@@ -114,7 +118,7 @@ const App = {
     this.render();
     try {
       await signIn();
-      const [me, directory, dhOptions, hmMembers, approvers, recipients] = await Promise.all([
+      const [me, directory, dhOptions, hmMembers, approvers, recipients, appStatus] = await Promise.all([
         graphGetMe(),
         graphListUsers(),
         graphGetGroupMembers(GRAPH_GROUPS.FCPA_DH),
@@ -129,7 +133,9 @@ const App = {
         // below falls back to the static RECIPIENTS list in data.js if this
         // comes back empty, so a fetch failure degrades gracefully instead
         // of blocking sign-in or emptying the recipient picker.
-        graphGetRecipientDirectory().catch(e => { console.error("FCPA Customer list fetch failed:", e); return []; })
+        graphGetRecipientDirectory().catch(e => { console.error("FCPA Customer list fetch failed:", e); return []; }),
+        // Maintenance flag — fails OPEN: if AppConfig can't be read, don't lock everyone out.
+        graphGetAppStatus().catch(e => { console.error("AppConfig status fetch failed:", e); return ""; })
       ]);
       const hmIds = new Set(hmMembers.map(u => u.graphId));
       directory.forEach(u => { u.higherManagement = hmIds.has(u.graphId); });
@@ -139,7 +145,8 @@ const App = {
       this.state.approvers = approvers;
       this.state.recipients = recipients;
       this.state.session = { employee: me };
-      this.state.view = "home";
+      this.state.appStatus = appStatus;
+      this.state.view = this.isMaintenance() ? "maintenance" : "home";
     } catch (e) {
       this.toast("Sign-in failed: " + (e.message || e));
     } finally {
@@ -148,12 +155,60 @@ const App = {
     }
   },
 
+  /* ======================= MAINTENANCE MODE ======================= */
+
+  isMaintenance() {
+    return this.state.appStatus.toLowerCase() === "maintenance";
+  },
+
+  // The Power App has no way off its maintenance screen (the user just closes
+  // the app and reopens it later). On the web "Check again" re-reads the flag
+  // so people don't have to sign out and back in once it's been switched off.
+  async recheckMaintenance() {
+    if (this.state.authBusy) return;
+    this.state.authBusy = true;
+    this.render();
+    try {
+      this.state.appStatus = await graphGetAppStatus();
+    } catch (e) {
+      console.error("AppConfig status fetch failed:", e);
+      this.state.appStatus = ""; // fail open, same as sign-in
+    }
+    this.state.authBusy = false;
+    this.state.view = this.isMaintenance() ? "maintenance" : "home";
+    this.render();
+  },
+
+  /* ======================= SIX-MONTH RECIPIENT HISTORY ======================= */
+
+  // Loads the real per-recipient spend history once per session, the first time
+  // Tab C / the Summary popup needs it (see graphGetRecipientSpendHistory()).
+  ensureRecipientHistory() {
+    const h = this.state.history;
+    if (h.status !== "idle") return;
+    h.status = "loading";
+    graphGetRecipientSpendHistory().then(res => {
+      this.state.history = { status: "ready", byRecipient: res.byRecipient, warnings: res.warnings, error: "" };
+    }).catch(e => {
+      this.state.history = { status: "error", byRecipient: {}, warnings: [], error: (e && e.message) || String(e) };
+    }).finally(() => this.render());
+  },
+
+  // Previous-six-months rows for one recipient. Recipients that didn't come
+  // from the FCPA Customer list (no SharePoint id — e.g. the static fallback or
+  // a recipient whose SharePoint save failed) have no history to look up.
+  recipientHistory(r) {
+    if (!r || r.recipientId == null) return [];
+    return this.state.history.byRecipient[r.recipientId] || [];
+  },
+
   /* ======================= RENDER DISPATCH ======================= */
 
   render() {
     const app = document.getElementById("app");
     let body = "";
-    if (this.state.view === "login") body = this.renderLogin();
+    if (this.state.view === "maintenance") body = this.renderMaintenance();
+    else if (this.state.view === "login") body = this.renderLogin();
     else if (this.state.view === "home") body = this.topbar() + this.renderHome();
     else if (this.state.view === "newRequest") body = this.topbar() + this.renderNewRequest();
     else if (this.state.view === "submission") body = this.topbar() + this.renderSubmission();
@@ -189,6 +244,21 @@ const App = {
         <p class="small muted" style="text-align:left;margin:20px 0 20px;">Sign in with your corporate Microsoft account to continue. If you're an approver (CFO, GCOO, MD, EXCO, Compliance Committee, Department Head, HOD/SHOD...), signing in also unlocks your Approver Console automatically — there's no separate approver sign-in anymore.</p>
         <button class="btn btn-primary" style="width:100%;" onclick="App.signInWithMicrosoft()" ${this.state.authBusy ? "disabled" : ""}>${this.state.authBusy ? "Signing in&hellip;" : "Sign in with Microsoft"}</button>
         <div class="hint">Uses your real Microsoft 365 sign-in and directory profile.</div>
+      </div>
+    </div>`;
+  },
+
+  // Same wording as the Power App's scrMaintenance screen.
+  renderMaintenance() {
+    return `
+    <div class="login-wrap">
+      <div class="login-card">
+        <h1>ABC</h1>
+        <p class="sub">System Maintenance</p>
+        <p class="small" style="text-align:left;margin:20px 0 8px;">We're working on some updates to the ABC Application to streamline your submission process. The system is temporarily unavailable and will be back shortly.</p>
+        <p class="small" style="text-align:left;margin:0 0 20px;"><b>Thank you for your patience.</b></p>
+        <button class="btn btn-primary" style="width:100%;" onclick="App.recheckMaintenance()" ${this.state.authBusy ? "disabled" : ""}>${this.state.authBusy ? "Checking&hellip;" : "Check again"}</button>
+        <button class="btn btn-secondary" style="width:100%;margin-top:8px;" onclick="App.signOut()">Sign out</button>
       </div>
     </div>`;
   },
@@ -510,20 +580,30 @@ const App = {
     if (!recipients.length) {
       return `<div class="card"><p class="muted">Add a recipient in Tab B to see their spending history here.</p></div>`;
     }
+    this.ensureRecipientHistory();
+    const h = this.state.history;
     let rows = "";
-    recipients.forEach(r => {
-      const hist = sixMonthHistory(r);
-      if (!hist.length) {
-        rows += `<tr><td>${esc(r.name)}</td><td>${esc(r.position)}</td><td colspan="7" class="muted">No prior record found for this recipient.</td></tr>`;
-      }
-      hist.forEach(row => {
-        rows += `<tr>
-          <td>${esc(r.name)}</td><td>${esc(r.position)}</td><td>${fmtDate(row.date)}</td><td>${esc(row.currency)}</td>
-          <td>${fmtMoney(row.gifts)}</td><td>${fmtMoney(row.meals)}</td><td>${fmtMoney(row.travel)}</td>
-          <td>${fmtMoney(row.entertainment)}</td><td>${fmtMoney(row.others)}</td><td><b>${fmtMoney(rowTotal(row))}</b></td>
-        </tr>`;
+    if (h.status === "loading" || h.status === "idle") {
+      rows = `<tr class="empty-row"><td colspan="10">Loading the previous six months from SharePoint&hellip;</td></tr>`;
+    } else if (h.status === "error") {
+      rows = `<tr class="empty-row"><td colspan="10">Couldn't load the previous six months from SharePoint: ${esc(h.error)}</td></tr>`;
+    } else {
+      recipients.forEach(r => {
+        const hist = this.recipientHistory(r);
+        if (!hist.length) {
+          rows += `<tr><td>${esc(r.name)}</td><td>${esc(r.position)}</td><td colspan="8" class="muted">No prior record found for this recipient.</td></tr>`;
+        }
+        hist.forEach(row => {
+          rows += `<tr>
+            <td>${esc(r.name)}</td><td>${esc(r.position)}</td><td>${fmtDate(row.date)}</td><td>USD</td>
+            <td>${fmtMoney(row.gifts)}</td><td>${fmtMoney(row.meals)}</td><td>${fmtMoney(row.travel)}</td>
+            <td>${fmtMoney(row.entertainment)}</td><td>${fmtMoney(row.others)}</td><td><b>${fmtMoney(rowTotal(row))}</b></td>
+          </tr>`;
+        });
       });
-    });
+    }
+    const warn = h.status === "ready" && h.warnings.length
+      ? `<p class="small" style="margin-top:10px;color:#b45309;">&#9888;&#65039; Some history may be missing: ${esc(h.warnings.join("; "))}</p>` : "";
     return `
     <div class="card">
       <div class="section-title">Record of Previous Six (6) Months of Recipient
@@ -535,7 +615,8 @@ const App = {
           <tbody>${rows}</tbody>
         </table>
       </div>
-      <p class="small muted" style="margin-top:10px;"><i>This history is read-only — it helps you sense-check a recipient before proposing new spending.</i></p>
+      ${warn}
+      <p class="small muted" style="margin-top:10px;"><i>Closed claims from the last six months, taken from the live SharePoint claim records. Read-only — it helps you sense-check a recipient before proposing new spending.</i></p>
     </div>`;
   },
 
@@ -1034,17 +1115,18 @@ const App = {
         </div>
       </div></div>`;
     } else if (d.claimSub === "list") {
-      const totalMYR = claimActualMYR(c);
+      const cur = claimCurrency(c);
+      const totalLocal = claimActualLocal(c);
       const totalUSD = claimActualUSD(c);
       const approvedBudget = computePreApprovalTotalUSD(rec);
       body = `<div class="card">
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>No</th><th>Date</th><th>Description</th><th>Has Receipt</th><th>Transaction Type</th><th>Payment Method</th><th>Amount (MYR)</th><th>Rate (USD to MYR)</th><th>Purpose</th>${editable ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>No</th><th>Date</th><th>Description</th><th>Has Receipt</th><th>Transaction Type</th><th>Payment Method</th><th>Amount (${esc(cur)})</th><th>Rate (USD to ${esc(cur)})</th><th>Purpose</th>${editable ? "<th></th>" : ""}</tr></thead>
           <tbody>
           ${c.lineItems.map((li, i) => `<tr>
             <td>${i + 1}</td><td>${fmtDate(li.date)}</td><td>${esc(li.description)}</td>
             <td>${esc(li.hasReceipt)}</td><td>${esc(li.transactionType)}</td><td>${esc(li.paymentMethod)}</td>
-            <td>${fmtMoney(li.amountMYR)}</td><td>${li.rate}</td><td>${esc(li.purpose)}</td>
+            <td>${fmtMoney(lineAmount(li))}</td><td>${lineRate(li, c) || "-"}</td><td>${esc(li.purpose)}</td>
             ${editable ? `<td><button class="btn-icon" onclick="App.removeClaimLineItem('${li.id}')">&#128465;</button></td>` : ""}
           </tr>`).join("") || `<tr class="empty-row"><td colspan="${editable ? 10 : 9}">No line items yet.</td></tr>`}
           </tbody>
@@ -1056,7 +1138,7 @@ const App = {
           ${editable ? `<button class="btn btn-secondary btn-sm" style="margin-top:8px;width:fit-content;" onclick="App.attachFile()">&#128206; Attach file</button>` : ""}
         </div>
         <div class="total-row" style="flex-direction:column;align-items:flex-end;gap:4px;">
-          <div>Actual Spending Amount in MYR : ${fmtMoney(totalMYR)}</div>
+          <div>Actual Spending Amount in ${esc(cur)} : ${fmtMoney(totalLocal)}</div>
           <div>Actual Spending Amount in USD : ${fmtMoney(totalUSD)}</div>
           <div>Approved Budgeted Amount (USD) : ${fmtMoney(approvedBudget)}</div>
         </div>
@@ -1131,12 +1213,20 @@ const App = {
   },
 
   openAddLineItemModal() {
-    this.state.modal = { type: "addLineItem", form: { date: todayISO(), description: "", hasReceipt: "Yes", transactionType: TRANSACTION_TYPES[0], paymentMethod: PAYMENT_METHODS[0], amountMYR: 0, rate: 4.2, purpose: "" } };
+    this.state.modal = { type: "addLineItem", form: { date: todayISO(), description: "", hasReceipt: "Yes", transactionType: TRANSACTION_TYPES[0], paymentMethod: PAYMENT_METHODS[0], amount: 0, rate: 0, purpose: "" } };
     this.render();
   },
   submitAddLineItemModal() {
     const f = this.state.modal.form;
-    Store.addClaimLineItem(this.state.detail.id, f);
+    // Same guards as the Power App's add-item dialog: no negative amounts, and a
+    // Credit Card line needs its own bank conversion rate (Cash lines just use
+    // the claim's header rate, so the rate box is hidden for them).
+    if (!(f.amount >= 0)) { this.toast("Please ensure the amount is valid and numeric! It should be greater than zero."); return; }
+    const card = f.paymentMethod === "Credit Card";
+    if (card && !(f.rate > 0)) { this.toast("Please enter the bank conversion rate for this credit card payment."); return; }
+    const item = { ...f };
+    if (!card) delete item.rate;
+    Store.addClaimLineItem(this.state.detail.id, item);
     this.state.modal = null;
     this.render();
   },
@@ -1330,9 +1420,11 @@ const App = {
   },
 
   modalSixMonthSummary(m) {
-    const rows = m.recipients.map(r => {
-      const hist = sixMonthHistory(r);
-      const totalUSD = hist.reduce((s, row) => s + toUSD(rowTotal(row), row.currency), 0);
+    this.ensureRecipientHistory();
+    const loading = this.state.history.status !== "ready";
+    const rows = loading ? "" : m.recipients.map(r => {
+      // Amounts on the SharePoint rows are already USD (claim total / conversion rate when the claim was submitted).
+      const totalUSD = this.recipientHistory(r).reduce((s, row) => s + rowTotal(row), 0);
       const warn = totalUSD > 1000;
       return `<tr><td>${esc(r.name)}<br><span class="muted small">${esc(r.company)}</span></td><td>${esc(r.position)}</td><td>${fmtMoney(totalUSD)}</td><td>${warn ? "&#9888;&#65039;" : ""}</td></tr>`;
     }).join("");
@@ -1341,7 +1433,9 @@ const App = {
         <h3>Sum for Previous Six Months Record of Recipient</h3>
         <div class="table-wrap"><table class="data">
           <thead><tr><th>Name of Recipient</th><th>Position</th><th>Total Expenses in USD</th><th></th></tr></thead>
-          <tbody>${rows || `<tr class="empty-row"><td colspan="4">No recipients yet.</td></tr>`}</tbody>
+          <tbody>${loading
+            ? `<tr class="empty-row"><td colspan="4">${this.state.history.status === "error" ? "Couldn't load the previous six months from SharePoint: " + esc(this.state.history.error) : "Loading&hellip;"}</td></tr>`
+            : (rows || `<tr class="empty-row"><td colspan="4">No recipients yet.</td></tr>`)}</tbody>
         </table></div>
         <div class="modal-actions"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
       </div>
@@ -1388,6 +1482,8 @@ const App = {
 
   modalAddLineItem(m) {
     const f = m.form;
+    const rec = Store.get(this.state.detail.id);
+    const cur = rec && rec.claim ? claimCurrency(rec.claim) : "MYR";
     return `<div class="modal-overlay" onmousedown="if(event.target===this) App.closeModal()">
       <div class="modal">
         <h3>Add claim line item</h3>
@@ -1395,9 +1491,9 @@ const App = {
         <div class="field"><label>Description</label><input type="text" value="${esc(f.description)}" oninput="App.state.modal.form.description=this.value"></div>
         <div class="field"><label>Has Receipt</label><select onchange="App.state.modal.form.hasReceipt=this.value"><option ${f.hasReceipt === "Yes" ? "selected" : ""}>Yes</option><option ${f.hasReceipt === "No" ? "selected" : ""}>No</option></select></div>
         <div class="field"><label>Transaction Type</label><select onchange="App.state.modal.form.transactionType=this.value">${TRANSACTION_TYPES.map(t => `<option ${f.transactionType === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
-        <div class="field"><label>Payment Method</label><select onchange="App.state.modal.form.paymentMethod=this.value">${PAYMENT_METHODS.map(t => `<option ${f.paymentMethod === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
-        <div class="field"><label>Amount (MYR)</label><input type="number" step="0.01" value="${f.amountMYR}" oninput="App.state.modal.form.amountMYR=parseFloat(this.value)||0"></div>
-        <div class="field"><label>Rate (USD to MYR)</label><input type="number" step="0.0001" value="${f.rate}" oninput="App.state.modal.form.rate=parseFloat(this.value)||0"></div>
+        <div class="field"><label>Payment Method</label><select onchange="App.state.modal.form.paymentMethod=this.value;App.render()">${PAYMENT_METHODS.map(t => `<option ${f.paymentMethod === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+        <div class="field"><label>Amount (${esc(cur)})</label><input type="number" step="0.01" min="0" value="${f.amount}" oninput="App.state.modal.form.amount=parseFloat(this.value)||0"></div>
+        ${f.paymentMethod === "Credit Card" ? `<div class="field"><label>Bank Conversion Rate (USD to ${esc(cur)})</label><input type="number" step="0.0001" min="0" value="${f.rate || ""}" oninput="App.state.modal.form.rate=parseFloat(this.value)||0"></div>` : ""}
         <div class="field"><label>Purpose</label><input type="text" value="${esc(f.purpose)}" oninput="App.state.modal.form.purpose=this.value"></div>
         <div class="modal-actions">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>

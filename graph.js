@@ -107,7 +107,11 @@ const LIST_IDS = {
   "ABC Pre-Approval": "2bdb3de6-b68b-49b3-bb18-8dae7525f95d",
   "ABC Recipient Final Expenses": "388f9b55-990f-4081-8998-ba21fb549421",
   "ABC Authority": "cd1ebc4f-3ac8-4589-8d9b-fb6251661482", // the existing list, reused as the admin-managed roster
-  "FCPA Customer": "632cdbed-11bb-460c-9a4e-8f885cf626b4"  // real, populated recipient master (replaces the hardcoded RECIPIENTS array in data.js)
+  "FCPA Customer": "632cdbed-11bb-460c-9a4e-8f885cf626b4", // real, populated recipient master (replaces the hardcoded RECIPIENTS array in data.js)
+  "AppConfig": "225d0d67-9498-4b84-b52e-9e696c1ec50c",      // same maintenance-flag list the Power App's StartScreen reads (row ID 1, text column "Status") — confirmed 2026-10-06
+  "ABC Claim Form": "527f51c2-ec50-45e9-8f56-364712eff0c3",
+  "FCPA Claim Form": "261ced47-e4ce-4584-8abc-97eefbb68e1e",                // READ-ONLY here — six-month recipient history only (see graphGetRecipientSpendHistory)
+  "FCPA Recipient Final Expenses": "c9c76ef2-9f33-4b26-98db-ebf1a2603b8d"   // READ-ONLY here — same
 };
 function resolveListRef(listName) {
   return LIST_IDS[listName] || listName;
@@ -119,6 +123,33 @@ async function graphListItems(listName, filterOData) {
   const filter = filterOData ? `&$filter=${encodeURIComponent(filterOData)}` : "";
   const data = await graphFetch(`/sites/${siteId}/lists/${ref}/items?expand=fields${filter}`);
   return data.value.map(item => ({ id: item.id, ...item.fields }));
+}
+
+// Every item in a list, following @odata.nextLink paging (graphListItems above
+// only returns the first page). selectFields trims the payload to just the
+// columns needed; if Graph rejects that $select (e.g. an unexpected hidden
+// lookup-id column name) it retries once with the full field set rather than
+// failing the whole call.
+async function graphListAllItems(listName, selectFields) {
+  const siteId = await getSiteId();
+  const ref = resolveListRef(listName);
+  async function pull(expand) {
+    const items = [];
+    let path = `/sites/${siteId}/lists/${ref}/items?$expand=${expand}&$top=999`;
+    while (path) {
+      const page = await graphFetch(path);
+      items.push(...page.value.map(item => ({ id: item.id, ...item.fields })));
+      path = page["@odata.nextLink"] ? page["@odata.nextLink"].replace("https://graph.microsoft.com/v1.0", "") : null;
+    }
+    return items;
+  }
+  if (!selectFields) return pull("fields");
+  try {
+    return await pull(`fields($select=${selectFields.join(",")})`);
+  } catch (e) {
+    console.warn("Graph $select failed for", listName, "- retrying with all fields:", e);
+    return pull("fields");
+  }
 }
 
 async function graphCreateItem(listName, fields) {
@@ -154,7 +185,7 @@ async function graphDeleteItem(listName, itemId) {
    to come from your own source (e.g. an ABC_EmployeeRouting SharePoint
    list keyed by employeeId), merged in after this mapping.
    ------------------------------------------------------------------------- */
-const GRAPH_USER_SELECT = "id,displayName,mail,userPrincipalName,jobTitle,department,employeeId";
+const GRAPH_USER_SELECT = "id,displayName,mail,userPrincipalName,jobTitle,department,employeeId,country";
 
 function mapGraphUser(u) {
   return {
@@ -164,6 +195,10 @@ function mapGraphUser(u) {
     department: u.department || "",
     position: u.jobTitle || "",
     email: (u.mail || u.userPrincipalName || "").toLowerCase(),
+    country: u.country || "",  // Entra ID "Country" profile field — same source the original
+                                // Power Apps build uses (Office365Users.MyProfile().Country) to
+                                // tag the ABC reference number with the submitter's country, e.g.
+                                // "ABC-MY-...", "ABC-Vietnam-...". Used by genRefNo() in store.js.
     team: null,            // fill in from your routing source
     higherManagement: false // set via applyHigherManagementFlag() below
   };
@@ -241,13 +276,18 @@ async function graphGetApproverRoster() {
    FCPA Customer (SharePoint list, already existed on the site before this
    app — GUID in LIST_IDS above) — the real, populated recipient master
    Winnie's team already maintains in SharePoint (this is what the "Name of
-   Recipient" search in Tab B should pull from, replacing the hardcoded
-   RECIPIENTS array in data.js). Read-only from this app — add/edit rows
-   directly in SharePoint's own list view. Column names confirmed
-   2026-09-08 via Graph Explorer:
+   Recipient" search in Tab B pulls from, replacing the hardcoded RECIPIENTS
+   array in data.js). Column names confirmed 2026-09-08 via Graph Explorer:
      GET /sites/{siteId}/lists/632cdbed-11bb-460c-9a4e-8f885cf626b4/items?expand=fields
    Unlike ABC Authority, this list's internal name matches its display name
    exactly ("FCPA Customer"), so there's no name/displayName mismatch risk.
+
+   Mostly read-only from this app, with one write path: when someone on
+   RECIPIENT_OVERRIDE_ALLOWLIST (data.js) uses "Can't find the recipient?"
+   on Tab B, App.submitAddRecipientModal() calls graphCreateRecipient()
+   below to push that new recipient into this same list, so it becomes a
+   normal, searchable directory entry for everyone from then on — not just
+   a one-off local addition to that single request.
    ------------------------------------------------------------------------- */
 function mapRecipientRow(item) {
   return {
@@ -263,4 +303,101 @@ function mapRecipientRow(item) {
 async function graphGetRecipientDirectory() {
   const rows = await graphListItems("FCPA Customer");
   return rows.map(mapRecipientRow);
+}
+
+// Pushes an ad hoc recipient (from the "Can't find the recipient?" modal)
+// into the real FCPA Customer list, using the same field mapping as
+// mapRecipientRow() above (reversed). Returns the created row already
+// shaped like every other recipientDirectory() entry — including its real
+// SharePoint item id — so the caller can drop it straight into
+// App.state.recipients without waiting on a re-sync.
+async function graphCreateRecipient(fields) {
+  const item = await graphCreateItem("FCPA Customer", {
+    Title: fields.name,
+    Position: fields.position || "",
+    Company_x002f_Organization: fields.company,
+    RelationshipwithRGB: fields.relationship || "",
+    Official: fields.isOfficial || "No"
+  });
+  return mapRecipientRow(item);
+}
+
+/* -------------------------------------------------------------------------
+   Maintenance mode — mirrors the Power App's App.StartScreen:
+     If(LookUp(AppConfig, ID = 1).Status = "Maintenance", scrMaintenance, HomeScreen)
+   Flip the Status text on row 1 of the AppConfig list to "Maintenance" to
+   lock everyone out, back to anything else (currently "Active") to reopen.
+   Checked once at sign-in, like the Power App checks once at app start.
+   ------------------------------------------------------------------------- */
+async function graphGetAppStatus() {
+  const siteId = await getSiteId();
+  const item = await graphFetch(`/sites/${siteId}/lists/${resolveListRef("AppConfig")}/items/1?$expand=fields($select=Status)`);
+  return String((item.fields && item.fields.Status) || "").trim();
+}
+
+/* -------------------------------------------------------------------------
+   Six-month record of previous spend per recipient — the real data behind
+   Tab C and its Summary popup (replaces the old seeded mock history).
+   Same rule as the Power App's SubmitNewRequestScreen: take the per-recipient
+   category amounts on "Recipient Final Expenses" rows, but only for claims
+   that are Gate1 = "Closed" with CompleteApprovalDate in the last 6 months,
+   joining expense row -> claim on their shared FCPANo lookup. The amounts on
+   those rows were already divided by the claim's conversion rate when the
+   claim was submitted, so they're USD — no further conversion here.
+
+   Reads BOTH the ABC lists (the new system, still empty until claims run
+   through it) and the FCPA lists (where the real historical data lives).
+   The FCPA lists are only ever READ here, never written. To stop counting
+   FCPA history, delete that entry from SIX_MONTH_SOURCES.
+   ------------------------------------------------------------------------- */
+const SIX_MONTH_SOURCES = [
+  { label: "ABC",  claims: "ABC Claim Form",  expenses: "ABC Recipient Final Expenses" },
+  { label: "FCPA", claims: "FCPA Claim Form", expenses: "FCPA Recipient Final Expenses" }
+];
+
+function localISODate(d) {
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Resolves to { byRecipient: { <FCPA Customer item id>: [ {date, gifts, meals, travel, entertainment, others, source} ] }, warnings: [string] }.
+// Throws only if every source failed.
+async function graphGetRecipientSpendHistory() {
+  const since = new Date();
+  since.setMonth(since.getMonth() - 6);
+  const byRecipient = {};
+  const warnings = [];
+  let okSources = 0;
+  await Promise.all(SIX_MONTH_SOURCES.map(async src => {
+    try {
+      const [claims, expenses] = await Promise.all([
+        graphListAllItems(src.claims, ["Gate1", "CompleteApprovalDate", "FCPANoLookupId"]),
+        graphListAllItems(src.expenses, ["FCPANoLookupId", "RecipientIDLookupId", "Gifts", "Meals", "Entertainment", "Travel", "Others"])
+      ]);
+      const closedOn = new Map(); // FCPA No lookup id -> completion date (ISO)
+      claims.forEach(c => {
+        if (c.Gate1 === "Closed" && c.CompleteApprovalDate && c.FCPANoLookupId != null) {
+          const done = new Date(c.CompleteApprovalDate);
+          if (done >= since) closedOn.set(String(c.FCPANoLookupId), localISODate(done));
+        }
+      });
+      expenses.forEach(e => {
+        const date = closedOn.get(String(e.FCPANoLookupId));
+        if (!date || e.RecipientIDLookupId == null) return;
+        (byRecipient[e.RecipientIDLookupId] = byRecipient[e.RecipientIDLookupId] || []).push({
+          date,
+          gifts: Number(e.Gifts) || 0, meals: Number(e.Meals) || 0, travel: Number(e.Travel) || 0,
+          entertainment: Number(e.Entertainment) || 0, others: Number(e.Others) || 0,
+          source: src.label
+        });
+      });
+      okSources++;
+    } catch (e) {
+      console.error("Six-month history fetch failed for", src.label, e);
+      warnings.push(`${src.label} lists could not be read (${(e && e.message || e).toString().slice(0, 120)})`);
+    }
+  }));
+  if (!okSources) throw new Error(warnings.join("; ") || "No history source could be read");
+  Object.values(byRecipient).forEach(rows => rows.sort((a, b) => (a.date < b.date ? 1 : -1)));
+  return { byRecipient, warnings };
 }

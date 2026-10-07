@@ -33,43 +33,10 @@ function fmtMoney(n) {
   return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/* Deterministic pseudo-random generator seeded from a string, so each
-   recipient's mock 6-month history stays stable across re-renders. */
-function seededRand(seedStr) {
-  let h = 1779033703 ^ seedStr.length;
-  for (let i = 0; i < seedStr.length; i++) {
-    h = Math.imul(h ^ seedStr.charCodeAt(i), 3432918353);
-    h = (h << 13) | (h >>> 19);
-  }
-  return function () {
-    h = Math.imul(h ^ (h >>> 16), 2246822507);
-    h = Math.imul(h ^ (h >>> 13), 3266489909);
-    h ^= h >>> 16;
-    return (h >>> 0) / 4294967296;
-  };
-}
-
-function sixMonthHistory(recipient) {
-  const rand = seededRand(recipient.company + "|" + recipient.name);
-  const rows = [];
-  const count = 3 + Math.floor(rand() * 3);
-  for (let i = 0; i < count; i++) {
-    const monthsAgo = Math.floor(rand() * 6);
-    const d = new Date();
-    d.setMonth(d.getMonth() - monthsAgo);
-    d.setDate(1 + Math.floor(rand() * 27));
-    const iso = d.toISOString().slice(0, 10);
-    const pick = () => (rand() < 0.45 ? 0 : Math.round(rand() * 1400 * 100) / 100);
-    const row = {
-      date: iso,
-      currency: rand() < 0.7 ? "USD" : "MYR",
-      gifts: pick(), meals: pick(), travel: pick(), entertainment: pick(), others: pick()
-    };
-    rows.push(row);
-  }
-  rows.sort((a, b) => (a.date < b.date ? 1 : -1));
-  return rows;
-}
+/* The six-month recipient history used to be a seeded mock generated here
+   (sixMonthHistory). It now comes from the real SharePoint lists — see
+   graphGetRecipientSpendHistory() in graph.js and App.recipientHistory() in
+   app.js. */
 
 function rowTotal(row) {
   return row.gifts + row.meals + row.travel + row.entertainment + row.others;
@@ -198,6 +165,10 @@ function newBlankClaim(preApproval, prefill) {
     costBearBy: prefill ? "RGB Sdn Bhd" : "",
     date: prefill ? preApproval.dateSubmitted : "",
     conversionRate: prefill ? 4.2 : "",
+    // Currency the claim's line-item amounts are entered in — same as the
+    // pre-approval's currency, as in the Power App ("Amount in <Currency>").
+    // Seed claims below are MYR demo data, so they pin MYR to keep their totals.
+    currency: prefill ? "MYR" : (preApproval.currency || ""),
     purposeOfClaim: prefill ? preApproval.description : "",
     lineItems: [],
     attachments: [],
@@ -217,7 +188,7 @@ function newBlankClaim(preApproval, prefill) {
     claim.lineItems = preApproval.recipients.slice(0, 1).map((r, i) => ({
       id: uid(), date: preApproval.dateSubmitted, description: "Dinner with " + r.name,
       hasReceipt: "Yes", transactionType: "Meals", paymentMethod: "Cash",
-      amountMYR: 620, rate: 4.2, purpose: "Client engagement", attachment: "receipt-0" + (i + 1) + ".pdf"
+      amount: 620, purpose: "Client engagement", attachment: "receipt-0" + (i + 1) + ".pdf"
     }));
     claim.register.month = "June";
     claim.approvals = buildChain(claimChainDef(isHigherManagement(preApproval.requestor), claimActualUSD(claim)), chainResolveMap(preApproval.requestor, preApproval.departmentHead));
@@ -225,13 +196,39 @@ function newBlankClaim(preApproval, prefill) {
   return claim;
 }
 
-function claimActualMYR(claim) {
-  return claim.lineItems.reduce((s, li) => s + (Number(li.amountMYR) || 0), 0);
+/* Claim line-item money — ported from the Power App's ClaimForm screen
+   (TotalAmountClaimFormListConverted), which converts each line on its own:
+     - the line's rate is the claim's header Conversion Rate for Cash (and any
+       other non-card method), or the line's own bank rate for Credit Card;
+     - rates are entered as "USD to <currency>" (e.g. 4.2 for MYR), so USD =
+       amount / rate for rates >= 1 and amount * rate for rates < 1 — except
+       EUR / GBP, which are entered the other way round (1.09 meaning
+       EUR->USD), so the two branches flip;
+     - a rate of 0 contributes 0 USD.
+   Older saved lines used amountMYR (always MYR) — lineAmount()/claimCurrency()
+   keep those readable. */
+function claimCurrency(claim) {
+  return claim.currency || "MYR";
+}
+function lineAmount(li) {
+  return Number(li.amount != null ? li.amount : li.amountMYR) || 0;
+}
+function lineRate(li, claim) {
+  return li.paymentMethod === "Credit Card" ? (Number(li.rate) || 0) : (Number(claim.conversionRate) || 0);
+}
+function lineAmountUSD(amount, rate, currency) {
+  if (!(rate > 0)) return 0;
+  const cur = (currency || "").toUpperCase();
+  const flipped = cur === "EUR" || cur === "EURO" || cur === "GBP";
+  const multiply = flipped ? rate >= 1 : rate < 1;
+  return multiply ? amount * rate : amount / rate;
+}
+function claimActualLocal(claim) {
+  return claim.lineItems.reduce((s, li) => s + lineAmount(li), 0);
 }
 function claimActualUSD(claim) {
-  const myr = claimActualMYR(claim);
-  const rate = Number(claim.conversionRate) || 0;
-  return rate > 0 ? myr / rate : 0;
+  const cur = claimCurrency(claim);
+  return claim.lineItems.reduce((s, li) => s + lineAmountUSD(lineAmount(li), lineRate(li, claim), cur), 0);
 }
 
 function seedState() {
