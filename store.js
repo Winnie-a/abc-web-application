@@ -440,6 +440,119 @@ async function pushPreApprovalToSharePoint(rec) {
   }
 }
 
+/* --------------------------------------------------------------------------
+   SharePoint push — ABC Claim Form
+   One row per claim, created when the claim is submitted and updated on every
+   approve/reject. Column facts below were read from the live list on
+   2026-10-07:
+     - Title holds the ABC reference number — that is how a claim row is found
+       again. The list's "FCPANo" lookup is deliberately NOT written: it still
+       points at the FCPA Pre-Approval list (d2160a4e…), so filling it with an
+       ABC Pre-Approval item id would link the claim to an unrelated FCPA row.
+     - Gate1 (overall) choices: Open / Pending / Closed / Cancelled. Same as the
+       Power Automate flows: a fully approved claim is Closed, and a rejection
+       puts it back to Open (the flows reset Gate1 to Open on any rejection).
+     - Stage columns: HOD, SHOD, DH, CFO, COO, GCOO have clean names
+       (Gate1<Stage>..., Gate1<Stage>Email...). MD and the 7 EXCO seats were
+       created later and carry SharePoint's mangled, truncated internal names,
+       listed explicitly in CLAIM_MD_COLS / claimExcoCols() below.
+   -------------------------------------------------------------------------- */
+const CLAIM_MD_COLS = {
+  name: "Gate_x0020_1_x0020_MD", email: "Gate_x0020_1_x0020_MD_x0020_Emai", position: "Gate_x0020_1_x0020_MD_x0020_Posi",
+  status: "Gate_x0020_1_x0020_MD_x0020_Appr", date: "Gate_x0020_1_x0020_MD_x0020_Appr0",
+  comments: "Gate_x0020_1_x0020_MD_x0020_Comm", reject: "Gate_x0020_1_x0020_MD_x0020_Reje"
+};
+function claimExcoCols(seat) {
+  const p = "Gate_x0020_1_x0020_EXCO_x0020_" + seat;
+  return { name: p, email: p + "_", position: p + "_0", status: p + "_1", date: p + "_2", comments: p + "_3", reject: p + "_4" };
+}
+// Column names for the stage at stages[idx]. EXCO stages map to seats 1..7 in
+// chain order (SVP first ... MD last), the same order the list's seats use.
+function claimStageColumns(stages, idx) {
+  const title = stages[idx].title;
+  if (title === "MD") return CLAIM_MD_COLS;
+  if (/^EXCO - /.test(title)) {
+    const seat = stages.slice(0, idx + 1).filter(s => /^EXCO - /.test(s.title)).length;
+    return claimExcoCols(seat);
+  }
+  const p = "Gate1" + title.replace(/\s+/g, "");
+  return { name: p, email: p + "Email", position: p + "Position", status: p + "ApprovalStatus", date: p + "ApprovalDate", comments: p + "Comments", reject: p + "RejectReason" };
+}
+function spClaimOverallStatus(stages) {
+  if (stages.some(s => s.status === "rejected")) return "Open";
+  if (stages.length && stages.every(s => s.status === "approved")) return "Closed";
+  return "Pending";
+}
+function claimGateFields(stages, idx) {
+  const stage = stages[idx], c = claimStageColumns(stages, idx), f = {};
+  f[c.name] = stage.name || "";
+  f[c.email] = stage.email || "";
+  f[c.position] = stage.position || "";
+  f[c.comments] = stage.comments || "";
+  f[c.reject] = stage.rejectReason || "";
+  const status = spStageStatus(stage.status);
+  if (status) f[c.status] = status;
+  if (stage.date) f[c.date] = stage.date;
+  return f;
+}
+
+async function findClaimRowId(rec) {
+  if (rec.claim.spId) return rec.claim.spId;
+  const siteId = await getSiteId();
+  const filter = encodeURIComponent(`fields/Title eq '${String(rec.refNo).replace(/'/g, "''")}'`);
+  const data = await graphFetch(
+    `/sites/${siteId}/lists/${resolveListRef("ABC Claim Form")}/items?$filter=${filter}&$select=id`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } }
+  );
+  const row = data.value && data.value[0];
+  if (row) rec.claim.spId = row.id;
+  return row ? row.id : null;
+}
+
+// Creates the claim's ABC Claim Form row (header + every approval stage in its
+// current state). Line items and the recipient register are not pushed yet.
+async function pushClaimToSharePoint(rec) {
+  const c = rec.claim;
+  const fields = {
+    Title: rec.refNo,
+    Gate1: spClaimOverallStatus(c.approvals),
+    SubmissionDate: c.submittedDate || todayISO(),
+    ConversionRate: Number(c.conversionRate) || 0,
+    Purposeofclaim: c.purposeOfClaim || "",
+    Month: c.register && c.register.month || "",
+    Year: c.register && Number(c.register.year) || 0,
+    Total: claimActualLocal(c), // total in the claim's own currency
+    CostBearCompany: c.costBearBy || "",
+    Company: c.company || "",
+    IsCancelled: false
+  };
+  c.approvals.forEach((_, i) => Object.assign(fields, claimGateFields(c.approvals, i)));
+  const item = await graphCreateItem("ABC Claim Form", fields);
+  c.spId = item.id;
+}
+
+// Saves ONE approve/reject on a Claim stage — same shape as
+// savePreApprovalDecision(). If the claim has no row yet, the whole claim is
+// created with its current state instead.
+async function saveClaimDecision(rec, stageIndex) {
+  const stages = rec.claim.approvals, stage = stages[stageIndex];
+  const itemId = await findClaimRowId(rec);
+  if (!itemId) { await pushClaimToSharePoint(rec); return; }
+  const c = claimStageColumns(stages, stageIndex);
+  const overall = spClaimOverallStatus(stages);
+  const fields = {
+    Gate1: overall,
+    [c.status]: spStageStatus(stage.status),
+    [c.date]: stage.date,
+    [c.comments]: stage.comments || "",
+    [c.reject]: stage.rejectReason || ""
+  };
+  const next = stages[stageIndex + 1];
+  if (stage.status === "approved" && next) fields[claimStageColumns(stages, stageIndex + 1).status] = "Pending";
+  if (overall === "Closed") fields.CompleteApprovalDate = stage.date;
+  await graphUpdateItem("ABC Claim Form", itemId, fields);
+}
+
 const Store = {
   state: null,
 
@@ -577,6 +690,7 @@ const Store = {
     rec.claim.approvals = buildChain(claimChainDef(isHigherManagement(rec.requestor), claimActualUSD(rec.claim)), chainResolveMap(rec.requestor, rec.departmentHead));
     rec.claim.submittedDate = todayISO();
     this.save();
+    this.syncDecision(rec, () => pushClaimToSharePoint(rec).then(() => this.save()));
     return pendingNotifyTarget(rec.claim.approvals);
   },
 
@@ -612,6 +726,7 @@ const Store = {
     advanceChain(rec.claim.approvals, stageIndex, action, comments, rejectReason);
     rec.claim.status = chainOverallStatus(rec.claim.approvals, "Open", "Closed");
     this.save();
+    this.syncDecision(rec, () => saveClaimDecision(rec, stageIndex).then(() => this.save()));
     return action === "approve" ? pendingNotifyTarget(rec.claim.approvals) : null;
   },
 
