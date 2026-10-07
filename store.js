@@ -454,9 +454,12 @@ async function pushPreApprovalToSharePoint(rec) {
        Pre-Approval row. The older "FCPANo" lookup is deliberately NOT written:
        it still points at the FCPA Pre-Approval list (d2160a4e…), so an ABC
        item id there would link the claim to an unrelated FCPA row.
-     - Gate1 (overall) choices: Open / Pending / Closed / Cancelled. Same as the
-       Power Automate flows: a fully approved claim is Closed, and a rejection
-       puts it back to Open (the flows reset Gate1 to Open on any rejection).
+     - Gate1 (overall) choices: Open / Pending / Closed / Cancelled / Rejected
+       ("Rejected" added to the list 2026-10-07 to match the FCPA Claim Form's
+       choices). A fully approved claim is Closed and a rejected one is Rejected,
+       so the list matches what the web app shows. (The Power Automate flows
+       instead reset Gate1 to Open on a rejection so the claim can be resubmitted;
+       the web app has no resubmit step.)
      - Stage columns: HOD, SHOD, DH, CFO, COO, GCOO have clean names
        (Gate1<Stage>..., Gate1<Stage>Email...). MD and the 7 EXCO seats were
        created later and carry SharePoint's mangled, truncated internal names,
@@ -484,7 +487,7 @@ function claimStageColumns(stages, idx) {
   return { name: p, email: p + "Email", position: p + "Position", status: p + "ApprovalStatus", date: p + "ApprovalDate", comments: p + "Comments", reject: p + "RejectReason" };
 }
 function spClaimOverallStatus(stages) {
-  if (stages.some(s => s.status === "rejected")) return "Open";
+  if (stages.some(s => s.status === "rejected")) return "Rejected";
   if (stages.length && stages.every(s => s.status === "approved")) return "Closed";
   return "Pending";
 }
@@ -600,30 +603,47 @@ async function saveClaimDecision(rec, stageIndex) {
 // Cancelled), and its claim row (Gate 1 = Cancelled) unless the claim was
 // already Closed. Rows that were never saved are skipped — there is nothing to
 // cancel there.
+// The cancel reason typed in the dialog goes into the "CancelReason" column of
+// each list (single line of text, max 255 characters, so it is trimmed).
+// Left out when blank. SharePoint's own Modified date records when.
+function cancelReasonFields(reason) {
+  const r = String(reason || "").replace(/\s+/g, " ").trim().slice(0, 255);
+  return r ? { CancelReason: r } : {};
+}
+
 async function saveCancellation(rec, claimWasClosed) {
   const preId = await findPreApprovalRowId(rec);
-  if (preId) await graphUpdateItem("ABC Pre-Approval", preId, { Gate0: "Cancelled", IsCancelled: true });
+  if (preId) await graphUpdateItem("ABC Pre-Approval", preId, { Gate0: "Cancelled", IsCancelled: true, ...cancelReasonFields(rec.cancelReason) });
   if (!claimWasClosed) {
     const claimId = await findClaimRowId(rec);
-    if (claimId) await graphUpdateItem("ABC Claim Form", claimId, { Gate1: "Cancelled", IsCancelled: true });
+    if (claimId) await graphUpdateItem("ABC Claim Form", claimId, { Gate1: "Cancelled", IsCancelled: true, ...cancelReasonFields(rec.cancelReason) });
   }
+}
+
+// Cancelling just a claim (the "Cancel" button on the Claim Form tab): only the
+// claim row's Gate 1 becomes Cancelled — the Pre-Approval stays Closed, as in
+// the FCPA claim flows. A claim that was never saved has no row, so nothing to do.
+async function saveClaimCancellation(rec) {
+  const claimId = await findClaimRowId(rec);
+  if (claimId) await graphUpdateItem("ABC Claim Form", claimId, { Gate1: "Cancelled", IsCancelled: true, ...cancelReasonFields(rec.claim && rec.claim.cancelReason) });
 }
 
 // Fresh read of SharePoint to see whether this request (or, for a claim
 // decision, its claim) has been cancelled — by this app, or by anyone using
-// the Power App / flows. Resolves true if cancelled (and marks the local copy
-// cancelled too). Throws if SharePoint can't be read.
-async function isCancelledInSharePoint(rec, which) {
+// the Power App / flows. Resolves "request" if the whole Pre-Approval is
+// cancelled, "claim" if only the claim is, or false. Throws if SharePoint can't
+// be read.
+async function cancelledScopeInSharePoint(rec, which) {
   const preId = await findPreApprovalRowId(rec);
   if (preId) {
     const f = await graphGetItemFields("ABC Pre-Approval", preId, ["IsCancelled", "Gate0"]);
-    if (f.IsCancelled === true || f.Gate0 === "Cancelled") return true;
+    if (f.IsCancelled === true || f.Gate0 === "Cancelled") return "request";
   }
   if (which === "claim") {
     const claimId = await findClaimRowId(rec);
     if (claimId) {
       const f = await graphGetItemFields("ABC Claim Form", claimId, ["IsCancelled", "Gate1"]);
-      if (f.IsCancelled === true || f.Gate1 === "Cancelled") return true;
+      if (f.IsCancelled === true || f.Gate1 === "Cancelled") return "claim";
     }
   }
   return false;
@@ -711,8 +731,23 @@ const Store = {
     this.syncDecision(rec, () => saveCancellation(rec, claimWasClosed));
   },
 
-  // Local half of a cancellation (also used when SharePoint says it was
-  // cancelled elsewhere).
+  // Cancels just the claim; the Pre-Approval stays as it is (Closed).
+  cancelClaim(id, reason) {
+    const rec = this.get(id);
+    if (!rec) return;
+    this.markClaimCancelled(rec, reason || "");
+    this.syncDecision(rec, () => saveClaimCancellation(rec));
+  },
+  markClaimCancelled(rec, reason) {
+    const claim = this.ensureClaim(rec.id);
+    claim.status = "Cancelled";
+    claim.cancelReason = reason;
+    claim.cancelDate = todayISO();
+    this.save();
+  },
+
+  // Local half of a whole-request cancellation (also used when SharePoint
+  // says it was cancelled elsewhere).
   markCancelled(rec, reason) {
     rec.status = "Cancelled";
     rec.cancelReason = reason;
@@ -731,11 +766,11 @@ const Store = {
     const rec = this.get(id);
     if (!rec || !rec.live || typeof isGraphConnected !== "function" || !isGraphConnected()) return false;
     if (rec.status === "Cancelled") return true;
-    if (await isCancelledInSharePoint(rec, which)) {
-      this.markCancelled(rec, "Cancelled in SharePoint (Power App or another user).");
-      return true;
-    }
-    return false;
+    if (which === "claim" && rec.claim && rec.claim.status === "Cancelled") return true;
+    const scope = await cancelledScopeInSharePoint(rec, which);
+    if (scope === "request") this.markCancelled(rec, "Cancelled in SharePoint (Power App or another user).");
+    else if (scope === "claim") this.markClaimCancelled(rec, "Cancelled in SharePoint (Power App or another user).");
+    return !!scope;
   },
 
   ensureClaim(id) {

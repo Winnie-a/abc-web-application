@@ -895,7 +895,10 @@ const App = {
         <td>${esc(r.submittedBy || r.requestor.name)}</td>
         <td>${fmtDate(r.dateSubmitted)}</td>
         <td><span class="pill ${pillClass(cs)}">${esc(cs)}</span></td>
-        <td><button class="btn-icon" title="Open" onclick="App.openDetail('${r.id}','claim')">&#128065;</button></td>
+        <td>
+          <button class="btn-icon" title="Open" onclick="App.openDetail('${r.id}','claim')">&#128065;</button>
+          <button class="btn-icon" title="Cancel / Withdraw claim" onclick="App.openCancelModal('${r.id}','claim')">&#10005;</button>
+        </td>
       </tr>`;
     }).join("");
     return `
@@ -956,15 +959,18 @@ const App = {
     </div>`;
   },
 
-  openCancelModal(id) {
-    this.state.modal = { type: "cancel", id, reason: "" };
+  // scope "claim" cancels only the claim (the Pre-Approval stays Closed);
+  // the default cancels the whole Pre-Approval and any open claim with it.
+  openCancelModal(id, scope) {
+    this.state.modal = { type: "cancel", id, reason: "", scope: scope || "preapproval" };
     this.render();
   },
   confirmCancel() {
-    const { id, reason } = this.state.modal;
-    Store.cancelPreApproval(id, reason);
+    const { id, reason, scope } = this.state.modal;
+    if (scope === "claim") Store.cancelClaim(id, reason);
+    else Store.cancelPreApproval(id, reason);
     this.state.modal = null;
-    this.toast("Submission cancelled / withdrawn.");
+    this.toast(scope === "claim" ? "Claim cancelled / withdrawn." : "Submission cancelled / withdrawn.");
     this.render();
   },
 
@@ -1035,6 +1041,7 @@ const App = {
         </div>
         <div class="detail-main">
           ${d.rail === "preapproval" ? this.renderDetailPreApproval(rec) : ""}
+          ${d.rail === "claim" && rec.claim && rec.claim.status === "Cancelled" ? `<div class="banner warn" style="margin-bottom:16px;"><span>&#10005;</span><div><b>Claim Cancelled / Withdrawn</b>${esc(rec.claim.cancelReason || rec.cancelReason || "No reason given.")} &middot; ${fmtDate(rec.claim.cancelDate || rec.cancelDate)}</div></div>` : ""}
           ${d.rail === "claim" ? this.renderDetailClaim(rec) : ""}
           ${d.rail === "approval" ? this.renderDetailApproval(rec) : ""}
         </div>
@@ -1321,7 +1328,9 @@ const App = {
         return;
       }
       if (cancelled) {
-        this.toast("This request has been cancelled — your decision was not recorded.");
+        this.toast(which === "claim"
+          ? "This claim (or its request) has been cancelled — your decision was not recorded."
+          : "This request has been cancelled — your decision was not recorded.");
         this.state.view = "approverHome";
         this.state.detail = null;
         this.render();
@@ -1508,12 +1517,14 @@ const App = {
     const rec = Store.get(m.id);
     return `<div class="modal-overlay" onmousedown="if(event.target===this) App.closeModal()">
       <div class="modal">
-        <h3>Cancel / withdraw ${esc(rec.refNo)}?</h3>
-        <p class="small muted">This stops the request from moving further through approval. This cannot be undone.</p>
+        <h3>Cancel / withdraw ${m.scope === "claim" ? "the claim for " : ""}${esc(rec.refNo)}?</h3>
+        <p class="small muted">${m.scope === "claim"
+          ? "This cancels the claim and stops it moving further through approval. The approved Pre-Approval is not affected. This cannot be undone."
+          : "This stops the request from moving further through approval. This cannot be undone."}</p>
         <div class="field"><label>Reason (optional)</label><textarea oninput="App.state.modal.reason=this.value"></textarea></div>
         <div class="modal-actions">
           <button class="btn btn-secondary" onclick="App.closeModal()">Never mind</button>
-          <button class="btn btn-danger" onclick="App.confirmCancel()">Cancel Submission</button>
+          <button class="btn btn-danger" onclick="App.confirmCancel()">${m.scope === "claim" ? "Cancel Claim" : "Cancel Submission"}</button>
         </div>
       </div>
     </div>`;
