@@ -410,6 +410,7 @@ async function pushPreApprovalToSharePoint(rec) {
     Position: rec.requestor.position,
     Email: rec.requestor.email || "",
     ProposedTransaction: rec.transactionTypes || [], // MultiChoice field — array, not a joined string
+    "ProposedTransaction@odata.type": "Collection(Edm.String)", // Graph rejects a multi-choice array (400 "Invalid request") without this type hint
     ProposedTransactionDescription: rec.description || "",
     Currency: rec.currency,
     Gifts: a.gifts, Meals: a.meals, Entertainment: a.entertainment, Airfare: a.airfare,
