@@ -65,7 +65,7 @@ function buildChain(stageDefs, resolveMap) {
     // Written to the SharePoint Gate<N><Stage>Email / Position columns. Left
     // blank (never guessed) when the approver isn't in the ABC Authority
     // roster or the Entra directory.
-    email: lookupApproverEmail(def.resolve ? (resolveMap[def.resolve] || "") : def.fixedName),
+    email: lookupApproverEmail(def.resolve ? (resolveMap[def.resolve] || "") : def.fixedName, def.fixedName ? def.title : ""),
     position: lookupApproverPosition(def.resolve ? (resolveMap[def.resolve] || "") : def.fixedName) || def.role
   }));
   if (stages.length) stages[0].status = "pending";
@@ -76,17 +76,28 @@ function buildChain(stageDefs, resolveMap) {
    Authority" roster first (App.state.approvers), then the Entra ID directory
    (App.state.directory) matched on display name. Both are only populated
    after sign-in, so this returns "" for seed/demo data. */
-function _approverRows(name) {
-  if (!name || typeof App === "undefined" || !App.state) return [];
-  const n = name.trim().toLowerCase();
+// Names compared without "(nickname)" suffixes and extra spaces, e.g. the
+// directory's "Liew Yung Kuan (YK)" matches the stage name "Liew Yung Kuan".
+function _normName(s) {
+  return String(s || "").toLowerCase().replace(/\(.*?\)/g, "").replace(/\s+/g, " ").trim();
+}
+function _approverRows(name, stageTitle) {
+  if (typeof App === "undefined" || !App.state) return [];
+  const n = _normName(name);
   const hits = [];
-  (App.state.approvers || []).forEach(r => { if ((r.name || "").trim().toLowerCase() === n) hits.push(r); });
-  (App.state.directory || []).forEach(u => { if ((u.name || "").trim().toLowerCase() === n) hits.push(u); });
+  if (n) {
+    (App.state.approvers || []).forEach(r => { if (_normName(r.name) === n) hits.push(r); });
+    (App.state.directory || []).forEach(u => { if (_normName(u.name) === n) hits.push(u); });
+  }
+  // fixed roles (CFO / GCOO / MD): the ABC Authority roster row for that role
+  if (!hits.length && stageTitle) {
+    (App.state.approvers || []).forEach(r => { if (String(r.role || "").trim().toLowerCase() === String(stageTitle).trim().toLowerCase()) hits.push(r); });
+  }
   return hits;
 }
-function lookupApproverEmail(name) {
-  const hit = _approverRows(name).find(r => r.email);
-  return hit ? hit.email : "";
+function lookupApproverEmail(name, stageTitle) {
+  const hit = _approverRows(name, stageTitle).find(r => r.email && String(r.email).trim());
+  return hit ? String(hit.email).trim() : "";
 }
 function lookupApproverPosition(name) {
   const hit = _approverRows(name).find(r => r.role || r.position);
